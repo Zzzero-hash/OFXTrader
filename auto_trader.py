@@ -1,8 +1,10 @@
 import oandapyV20
+from datetime import datetime, timedelta
 import time
 import os
 import json
 import requests
+import backtrader as bt
 from rich.console import Console
 from rich.table import Table
 from rich.live import Live
@@ -60,6 +62,125 @@ def validate_config(config):
         print(f"An error occurred while validating credentials: {e}")
         return False
     
+def fetch_historical_data(config, instrument, start, end, granularity):
+    """
+    Fetch historical data from the OANDA API in manageable chunks.
+    """
+    headers = {"Authorization": f"Bearer {config['access_token']}"}
+    url = f"https://api-fxpractice.oanda.com/v3/instruments/{instrument}/candles"
+    max_candles = 5000  # Maximum candles per request
+
+    # Determine the time delta per candle based on granularity
+    granularity_map = {
+        'S5': timedelta(seconds=5),
+        'S10': timedelta(seconds=10),
+        'S15': timedelta(seconds=15),
+        'S30': timedelta(seconds=30),
+        'M1': timedelta(minutes=1),
+        'M2': timedelta(minutes=2),
+        'M4': timedelta(minutes=4),
+        'M5': timedelta(minutes=5),
+        'M10': timedelta(minutes=10),
+        'M15': timedelta(minutes=15),
+        'M30': timedelta(minutes=30),
+        'H1': timedelta(hours=1),
+        'H2': timedelta(hours=2),
+        'H3': timedelta(hours=3),
+        'H4': timedelta(hours=4),
+        'H6': timedelta(hours=6),
+        'H8': timedelta(hours=8),
+        'H12': timedelta(hours=12),
+        'D': timedelta(days=1),
+        'W': timedelta(weeks=1),
+        'M': timedelta(days=30),  # Approximation for a month
+    }
+
+    if granularity not in granularity_map:
+        raise ValueError(f"Unsupported granularity: {granularity}")
+
+    candle_duration = granularity_map[granularity]
+    max_duration = candle_duration * max_candles
+
+    all_candles = []
+    next_start = datetime.fromisoformat(start.replace('Z', '+00:00'))
+    end_time = datetime.fromisoformat(end.replace('Z', '+00:00'))
+
+    while next_start < end_time:
+        next_end = min(next_start + max_duration, end_time)
+        params = {
+            "from": next_start.isoformat(),
+            "to": next_end.isoformat(),
+            "granularity": granularity,
+            "price": "M"  # Midpoint prices
+        }
+
+        response = requests.get(url, headers=headers, params=params)
+
+        if response.status_code == 200:
+            candles = response.json().get("candles", [])
+            all_candles.extend(candles)
+
+            if not candles or candles[-1]["time"] >= end:
+                break  # Exit loop if no more data or reached the end time
+
+            # Update next_start to fetch the next chunk
+            next_start = datetime.fromisoformat(candles[-1]["time"].replace('Z', '+00:00'))
+        else:
+            print(f"Error fetching historical data: {response.json()}")
+            break
+
+    print(f"Fetched {len(all_candles)} candles successfully.")
+    return all_candles
+
+    
+def format_data_for_backtrader(candles):
+    """
+    Convert OANDA candle data into a Pandas DataFrame suitable for Backtrader.
+    """
+    import pandas as pd
+    data = []
+    for candle in candles:
+        data.append({
+            "datetime": candle["time"],
+            "open": float(candle["mid"]["o"]),
+            "high": float(candle["mid"]["h"]),
+            "low": float(candle["mid"]["l"]),
+            "close": float(candle["mid"]["c"]),
+            "volume": int(candle["volume"]),
+        })
+    return pd.DataFrame(data)
+
+def backtesting_strategy(dataframe):
+    """
+    Run a simple backtesting strategy using Backtrader.
+    """
+    class MyStrategy(bt.Strategy):
+        def __init__(self):
+            self.data_close = self.datas[0].close
+            
+        def next(self):
+            if not self.position:
+                if self.data_close[0] > self.data_close[-1]:
+                    self.buy(size=1)
+            else:
+                if self.data_close[0] < self.data_close[-1]:
+                    self.sell(size=1)
+            
+    # Initialize Backtrader
+    cerebro = bt.Cerebro()
+    cerebro.addstrategy(MyStrategy)
+    
+    # Load data into Backtrader
+    data = bt.feeds.PandasData(dataname=dataframe)
+    cerebro.adddata(data)
+    
+    # Run backtesting
+    console.print("[green]Starting backtesting...[/green]")
+    cerebro.run()
+    console.print("[blue]Backtesting complete. Generating report...[/blue]")
+    cerebro.plot()
+    
+
 def get_account_details(config):
     """
     Fetch and display account details using the OANDA API.
@@ -147,12 +268,10 @@ if __name__ == "__main__":
     while not validate_config(config):
         print("Your credentials seem to be invalid. Let's try again.")
         config = create_config()
-    print("Your configuration:", config)
-    account_raw = get_account_details(config)
-    balance_info, open_trades = parse_account_details(account_raw)
-    trade_tracking_table(balance_info, open_trades)
-    while True:
-        update_live_display(config)
+    candles = fetch_historical_data(config, "EUR_USD", "2023-01-01T00:00:00Z", "2023-12-31T23:59:59Z", "H1")
+    if candles:
+        df = format_data_for_backtrader(candles)
+        backtesting_strategy(df)
    
     
     
