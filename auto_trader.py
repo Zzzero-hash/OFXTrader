@@ -1,14 +1,21 @@
 import oandapyV20
-from datetime import datetime, timedelta
+from oandapyV20.endpoints.instruments import InstrumentsCandles
+from datetime import datetime, timedelta, timezone
 import time
 import os
 import json
 import requests
 import backtrader as bt
+import pandas as pd
+from dateutil import parser
 from rich.console import Console
 from rich.table import Table
 from rich.live import Live
+import qlib
+from qlib.config import REG_US
+from qlib.contrib.strategy import TopkDropoutStrategy
 
+qlib.init(provider_uri="~/.qlib/qlib_data/us_data", region=REG_US)
 CONFIG_FILE = "config.json"
 OANDA_API_URL = "https://api-fxpractice.oanda.com/v3/accounts"
 console = Console()
@@ -29,7 +36,7 @@ def create_config():
     """
     print(f"{CONFIG_FILE} not found or credentials invalid. Let's create a new one.")
     account_id = input("Enter your OANDA Account ID: ").strip()
-    access_token = input("Enter your OANDA Acess Token: ").strip()
+    access_token = input("Enter your OANDA Access Token: ").strip()
     
     config = {
         "account_id": account_id,
@@ -62,124 +69,201 @@ def validate_config(config):
         print(f"An error occurred while validating credentials: {e}")
         return False
     
-def fetch_historical_data(config, instrument, start, end, granularity):
+def get_oanda_client(config):
     """
-    Fetch historical data from the OANDA API in manageable chunks.
+    Create an OANDA API client using the provided configuration.
     """
-    headers = {"Authorization": f"Bearer {config['access_token']}"}
-    url = f"https://api-fxpractice.oanda.com/v3/instruments/{instrument}/candles"
-    max_candles = 5000  # Maximum candles per request
+    return oandapyV20.API(access_token=config["access_token"])
 
-    # Determine the time delta per candle based on granularity
-    granularity_map = {
-        'S5': timedelta(seconds=5),
-        'S10': timedelta(seconds=10),
-        'S15': timedelta(seconds=15),
-        'S30': timedelta(seconds=30),
-        'M1': timedelta(minutes=1),
-        'M2': timedelta(minutes=2),
-        'M4': timedelta(minutes=4),
-        'M5': timedelta(minutes=5),
-        'M10': timedelta(minutes=10),
-        'M15': timedelta(minutes=15),
-        'M30': timedelta(minutes=30),
-        'H1': timedelta(hours=1),
-        'H2': timedelta(hours=2),
-        'H3': timedelta(hours=3),
-        'H4': timedelta(hours=4),
-        'H6': timedelta(hours=6),
-        'H8': timedelta(hours=8),
-        'H12': timedelta(hours=12),
-        'D': timedelta(days=1),
-        'W': timedelta(weeks=1),
-        'M': timedelta(days=30),  # Approximation for a month
-    }
 
-    if granularity not in granularity_map:
+    
+def fetch_historical_data(config, instrument, start=None, end=None, granularity=None):
+    """
+    Fetch historical candle data from OANDA, handling API limits for maximum candles.
+    """
+    # Validate and set default start and end times
+    if not start or not start.strip():
+        one_year_ago = datetime.now(tz=timezone.utc) - timedelta(days=365)
+        start = one_year_ago.replace(microsecond=0).isoformat()
+
+    if not end or not end.strip():
+        today = datetime.now(timezone.utc)
+        end = today.replace(microsecond=0).isoformat()
+
+    # Create OANDA API client
+    api = get_oanda_client(config)
+
+    # Validate granularity
+    supported_granularities = [
+        "S5", "S10", "S15", "S30", "M1", "M2", "M4", "M5", "M10",
+        "M15", "M30", "H1", "H2", "H3", "H4", "H6", "H8", "H12",
+        "D", "W", "M"
+    ]
+    if granularity not in supported_granularities:
         raise ValueError(f"Unsupported granularity: {granularity}")
 
-    candle_duration = granularity_map[granularity]
-    max_duration = candle_duration * max_candles
+    # Parse dates and ensure they're in the correct format
+    try:
+        start_dt = parser.parse(start).replace(tzinfo=None)
+        end_dt = parser.parse(end).replace(tzinfo=None)
+    except (TypeError, ValueError) as e:
+        print(f"Error parsing dates: {e}")
+        return pd.DataFrame()
 
-    all_candles = []
-    next_start = datetime.fromisoformat(start.replace('Z', '+00:00'))
-    end_time = datetime.fromisoformat(end.replace('Z', '+00:00'))
+    max_candles = 5000  # OANDA's maximum count limit
+    all_data = []
 
-    while next_start < end_time:
-        next_end = min(next_start + max_duration, end_time)
+    # Calculate the granularity duration in seconds
+    granularity_seconds = {
+        "S5": 5, "S10": 10, "S15": 15, "S30": 30,
+        "M1": 60, "M2": 120, "M4": 240, "M5": 300, "M10": 600,
+        "M15": 900, "M30": 1800, "H1": 3600, "H2": 7200,
+        "H3": 10800, "H4": 14400, "H6": 21600, "H8": 28800,
+        "H12": 43200, "D": 86400, "W": 604800, "M": 2592000
+    }.get(granularity, 3600)
+
+    # Fetch data in chunks
+    current_start = start_dt
+    while current_start < end_dt:
+        # Calculate the chunk end time
+        chunk_end = min(
+            current_start + timedelta(seconds=max_candles * granularity_seconds),
+            end_dt
+        )
+
         params = {
-            "from": next_start.isoformat(),
-            "to": next_end.isoformat(),
+            "from": current_start.isoformat() + 'Z',
+            "to": chunk_end.isoformat() + 'Z',
             "granularity": granularity,
-            "price": "M"  # Midpoint prices
+            "price": "M",
         }
 
-        response = requests.get(url, headers=headers, params=params)
+        print(f"Fetching chunk from {params['from']} to {params['to']}")
 
-        if response.status_code == 200:
-            candles = response.json().get("candles", [])
-            all_candles.extend(candles)
+        # Fetch data
+        r = InstrumentsCandles(instrument=instrument, params=params)
+        try:
+            response = api.request(r)
+        except oandapyV20.exceptions.V20Error as e:
+            print(f"V20Error fetching data: {e}")
+            return pd.DataFrame()
+        except Exception as e:
+            print(f"Unknown error fetching data: {e}")
+            return pd.DataFrame()
 
-            if not candles or candles[-1]["time"] >= end:
-                break  # Exit loop if no more data or reached the end time
-
-            # Update next_start to fetch the next chunk
-            next_start = datetime.fromisoformat(candles[-1]["time"].replace('Z', '+00:00'))
-        else:
-            print(f"Error fetching historical data: {response.json()}")
+        candles = response.get("candles", [])
+        if not candles:
+            print("No more candle data found.")
             break
 
-    print(f"Fetched {len(all_candles)} candles successfully.")
-    return all_candles
+        # Append the candles to all_data
+        for candle in candles:
+            all_data.append({
+                "datetime": candle["time"],
+                "open": float(candle["mid"]["o"]),
+                "high": float(candle["mid"]["h"]),
+                "low": float(candle["mid"]["l"]),
+                "close": float(candle["mid"]["c"]),
+                "volume": int(candle["volume"]),
+            })
 
-    
-def format_data_for_backtrader(candles):
-    """
-    Convert OANDA candle data into a Pandas DataFrame suitable for Backtrader.
-    """
-    import pandas as pd
-    data = []
-    for candle in candles:
-        data.append({
-            "datetime": candle["time"],
-            "open": float(candle["mid"]["o"]),
-            "high": float(candle["mid"]["h"]),
-            "low": float(candle["mid"]["l"]),
-            "close": float(candle["mid"]["c"]),
-            "volume": int(candle["volume"]),
-        })
-    return pd.DataFrame(data)
+        # Update start time for the next chunk
+        if candles:
+            last_candle_time = parser.parse(candles[-1]["time"]).replace(tzinfo=None)
+            current_start = last_candle_time + timedelta(seconds=granularity_seconds)
+        else:
+            break
 
-def backtesting_strategy(dataframe):
+        print(f"Fetched {len(candles)} candles. Total: {len(all_data)}")
+
+    # Convert to DataFrame
+    if all_data:
+        df = pd.DataFrame(all_data)
+        df['datetime'] = pd.to_datetime(df['datetime'])
+        df.set_index('datetime', inplace=True)
+    else:
+        print("No data returned for the specified range.")
+        df = pd.DataFrame()
+
+    return df
+
+
+def backtesting_strategy(dataframe, strategy_name, plot=True):
     """
-    Run a simple backtesting strategy using Backtrader.
+    Run a backtesting strategy using Backtrader with user selectable qlib strategies.
     """
     class MyStrategy(bt.Strategy):
-        def __init__(self):
-            self.data_close = self.datas[0].close
-            
+        """
+        A simple trading strategy that buys when the closing price is higher than the previous closing price
+        and sells when the closing price is lower than the previous closing price.
+        """
         def next(self):
+            if len(self.data.close) < 2:
+                return  # Not enough data points to compare
+
             if not self.position:
-                if self.data_close[0] > self.data_close[-1]:
-                    self.buy(size=1)
-            else:
-                if self.data_close[0] < self.data_close[-1]:
-                    self.sell(size=1)
-            
+                self.buy(size=1)
+            elif self.data_close[0] < self.data_close[-1]:
+                self.sell(size=1)
+
     # Initialize Backtrader
     cerebro = bt.Cerebro()
-    cerebro.addstrategy(MyStrategy)
-    
+
+    # Add strategy based on user selection
+    if strategy_name == "MyStrategy":
+        cerebro.addstrategy(MyStrategy)
+    else:
+        # Load qlib strategy
+
+        class QlibStrategy(bt.Strategy):
+            """
+            QlibStrategy integrates a qlib strategy into Backtrader.
+            This strategy uses the TopkDropoutStrategy from qlib to make trading decisions.
+            """
+            params = (
+            ('topk', 50),  # Recommended value for topk
+            ('n_drop', 5),  # Recommended value for n_drop
+            )
+
+            def __init__(self):
+                self.qlib_strategy = TopkDropoutStrategy(topk=self.params.topk, n_drop=self.params.n_drop, signal="price")
+
+            def next(self):
+                # Implement qlib strategy logic here
+                if len(self.data.close) < self.params.topk:
+                    return
+
+                # Get the latest data
+                latest_data = {
+                    'datetime': self.data.datetime.date(0),
+                    'close': self.data.close[0],
+                    'high': self.data.high[0],
+                    'low': self.data.low[0],
+                    'open': self.data.open[0],
+                    'volume': self.data.volume[0]
+                }
+
+                # Execute the strategy
+                self.qlib_strategy.update(latest_data)
+                signals = self.qlib_strategy.get_signal()
+
+                # Example: Buy if signal is 1, sell if signal is -1
+                if signals == 1 and not self.position:
+                    self.buy(size=1)
+                elif signals == -1 and self.position:
+                    self.sell(size=1)
+
+        cerebro.addstrategy(QlibStrategy)
+
     # Load data into Backtrader
     data = bt.feeds.PandasData(dataname=dataframe)
     cerebro.adddata(data)
-    
+
     # Run backtesting
     console.print("[green]Starting backtesting...[/green]")
     cerebro.run()
-    console.print("[blue]Backtesting complete. Generating report...[/blue]")
-    cerebro.plot()
-    
+    if plot:
+        cerebro.plot()
 
 def get_account_details(config):
     """
@@ -239,7 +323,7 @@ def trade_tracking_table(balance_info, open_trades):
     table.add_section()
     
     # Open Trades
-    table.add_column("Open Trades", justify="left", style="cyan", no_wrap=True, header_style="White")
+    table.add_column("Open Trades", justify="left", style="cyan", no_wrap=True)
     if open_trades:
         for trade in open_trades:
             table.add_row(f"Instrument: {trade['instrument']}")
@@ -262,19 +346,109 @@ def update_live_display(config):
                 table = trade_tracking_table(balance_info, open_trades)
                 live.update(table)
             time.sleep(5)
-        
-if __name__ == "__main__":
+
+def fetch_instrument_list(config):
+    """
+    Fetch the list of available instruments for trading.
+    """
+    headers = {
+        "Authorization": f"Bearer {config['access_token']}"
+    }
+    try:
+        print("Fetching instrument list...")
+        response = requests.get(f"{OANDA_API_URL}/{config['account_id']}/instruments", headers=headers)
+        if response.status_code == 200:
+            instruments = response.json().get("instruments", [])
+            print("Instrument list successfully fetched.")
+            return instruments
+        else:
+            print(f"Failed to fetch instrument list: {response.status_code} - {response.json().get('errorMessage', 'Unknown error')}")
+            return None
+    except requests.exceptions.RequestException as e:
+        print(f"An error occurred while fetching instrument list: {e}")
+        return None
+    
+def user_manual_bt(config, selected_strategy):
+    print(f"Selected strategy: {selected_strategy}")
+    candle_instrument = input("Enter the instrument to fetch historical data for (e.g. EUR_USD): ").strip()
+    candle_start = input("Enter the start date (e.g. 2023-01-01) or press enter for 1 year ago from today (default): ").strip()
+    candle_end = input("Enter the end date (e.g. 2023-12-31) or press enter for now(today): ").strip()
+    candle_granularity = input("Enter the granularity (e.g. H1) or press enter for 1 hour candles by default: ").strip()
+
+    # Append time to the date inputs
+    if candle_start:
+        candle_start += "T00:00:00Z"
+    if candle_end:
+        candle_end += "T00:00:00Z"
+
+    df = fetch_historical_data(config=config,
+                                instrument=candle_instrument, 
+                                start=candle_start, 
+                                end=candle_end, 
+                                granularity=candle_granularity if candle_granularity != '' else "H1"
+                                )
+    if df.empty:
+        print("No valid candle data returned. Aborting backtesting.")
+    else:
+        print("\nProcessing candles for backtesting...")
+        backtesting_strategy(df, selected_strategy)
+
+def user_selection():
+    """
+    Main user selection menu for the trading bot.
+    """
     config = load_config()
     while not validate_config(config):
         print("Your credentials seem to be invalid. Let's try again.")
         config = create_config()
-    candles = fetch_historical_data(config, "EUR_USD", "2023-01-01T00:00:00Z", "2023-12-31T23:59:59Z", "H1")
-    if candles:
-        df = format_data_for_backtrader(candles)
-        backtesting_strategy(df)
-   
-    
-    
-    
-    
-    
+    while True:
+        try:
+            account_mode = int(input("Enter a mode selection: 1 (Auto) or 2 (Manual): "))
+            if account_mode in [1, 2]:
+                break # Exit the loop if a valid mode is selected
+            else:
+                print("Invalid input. Please enter 1 (Auto) or 2 (Manual).")
+        except ValueError:
+            print("Invalid input. Please enter 1 (Auto) or 2 (Manual).")
+            continue
+        print(f"Account mode selected: {account_mode}") # Debug print
+
+    # Handle user_mode selection
+    while True:
+        if account_mode == 1:
+            user_mode = int(input("Auto mode selected. Choose bot mode: 1 (Live) or 2 (Backtesting): "))
+            if user_mode == 1:
+                print(f"User mode selected: {user_mode}") # Debug print
+                # TODO: Implement live trading mode
+                print("Live trading mode is not implemented yet.")
+                print(f"User mode selected: {user_mode}") # Debug print
+                print("Backtesting mode is not implemented yet.")
+            else:
+                print("Invalid mode selection. Please try again.")
+                continue
+        elif account_mode == 2:
+            user_mode = int(input("Manual mode selected. Choose bot mode: 1 (Live) or 2 (Backtesting): "))
+            if user_mode == 1:
+                print(f"User mode selected: {user_mode}") # Debug print
+                print("Manual trading mode is not implemented yet.")
+            if user_mode == 2:
+                print(f"User mode selected: {user_mode}") # Debug print
+                print("Backtesting mode is not implemented yet.")
+                print(f"Select an algorithm for backtesting: ")
+                strategies = ["TopkDropoutStrategy", "DoubleMaStrategy", "Alpha158", "Alpha360"]
+                for i, strategy in enumerate(strategies, 1):
+                    print(f"{i}. {strategy}")
+                strategy_choice = int(input("Enter the number of the strategy you want to use: "))
+                if 1 <= strategy_choice <= len(strategies):
+                    selected_strategy = strategies[strategy_choice - 1]
+                    print(f"Selected strategy: {selected_strategy}")
+                else:
+                    print("Invalid selection. Defaulting to MyStrategy.")
+                    selected_strategy = "MyStrategy"
+                user_manual_bt(config, selected_strategy)
+        else:
+            print("Invalid mode selection. Please try again.")
+            continue
+
+if __name__ == "__main__":
+    user_selection()
