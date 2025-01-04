@@ -5,7 +5,6 @@ import time
 import os
 import json
 import requests
-import backtrader as bt
 import pandas as pd
 from dateutil import parser
 from rich.console import Console
@@ -13,7 +12,7 @@ from rich.table import Table
 from rich.live import Live
 import qlib
 from qlib.config import REG_US
-from qlib.contrib.strategy import TopkDropoutStrategy
+from qlib.contrib.strategy import TopkDropoutStrategy, Alpha158, Alpha360
 
 qlib.init(provider_uri="~/.qlib/qlib_data/us_data", region=REG_US)
 CONFIG_FILE = "config.json"
@@ -189,81 +188,24 @@ def fetch_historical_data(config, instrument, start=None, end=None, granularity=
 
 
 def backtesting_strategy(dataframe, strategy_name, plot=True):
-    """
-    Run a backtesting strategy using Backtrader with user selectable qlib strategies.
-    """
-    class MyStrategy(bt.Strategy):
-        """
-        A simple trading strategy that buys when the closing price is higher than the previous closing price
-        and sells when the closing price is lower than the previous closing price.
-        """
-        def next(self):
-            if len(self.data.close) < 2:
-                return  # Not enough data points to compare
+    # Map strategy names to Qlib strategy implementations
+    strategies = {
+        "TopkDropoutStrategy": TopkDropoutStrategy(n_drop=5, n_top=10),
+        "Alpha158": Alpha158(),
+        "Alpha360": Alpha360()
+    }
 
-            if not self.position:
-                self.buy(size=1)
-            elif self.data_close[0] < self.data_close[-1]:
-                self.sell(size=1)
+    if strategy_name not in strategies:
+        print(f"Unknown strategy: {strategy_name}")
+        return
+    
+    strategy = strategies[strategy_name]
 
-    # Initialize Backtrader
-    cerebro = bt.Cerebro()
-
-    # Add strategy based on user selection
-    if strategy_name == "MyStrategy":
-        cerebro.addstrategy(MyStrategy)
-    else:
-        # Load qlib strategy
-
-        class QlibStrategy(bt.Strategy):
-            """
-            QlibStrategy integrates a qlib strategy into Backtrader.
-            This strategy uses the TopkDropoutStrategy from qlib to make trading decisions.
-            """
-            params = (
-            ('topk', 50),  # Recommended value for topk
-            ('n_drop', 5),  # Recommended value for n_drop
-            )
-
-            def __init__(self):
-                self.qlib_strategy = TopkDropoutStrategy(topk=self.params.topk, n_drop=self.params.n_drop, signal="price")
-
-            def next(self):
-                # Implement qlib strategy logic here
-                if len(self.data.close) < self.params.topk:
-                    return
-
-                # Get the latest data
-                latest_data = {
-                    'datetime': self.data.datetime.date(0),
-                    'close': self.data.close[0],
-                    'high': self.data.high[0],
-                    'low': self.data.low[0],
-                    'open': self.data.open[0],
-                    'volume': self.data.volume[0]
-                }
-
-                # Execute the strategy
-                self.qlib_strategy.update(latest_data)
-                signals = self.qlib_strategy.get_signal()
-
-                # Example: Buy if signal is 1, sell if signal is -1
-                if signals == 1 and not self.position:
-                    self.buy(size=1)
-                elif signals == -1 and self.position:
-                    self.sell(size=1)
-
-        cerebro.addstrategy(QlibStrategy)
-
-    # Load data into Backtrader
-    data = bt.feeds.PandasData(dataname=dataframe)
-    cerebro.adddata(data)
-
-    # Run backtesting
-    console.print("[green]Starting backtesting...[/green]")
-    cerebro.run()
-    if plot:
-        cerebro.plot()
+    # Simulate a simple data setup for Qlib (transforming OANDA data for Qlib use)
+    df = dataframe.reset_index()
+    df["date"] = df["datetime"].dt.strftime("%Y-%m-%d")
+    df["symbol"] = "OANDA_SIM"
+    df.rename(columns={"close": "feature"}, inplace=True)
 
 def get_account_details(config):
     """
