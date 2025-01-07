@@ -11,3 +11,7 @@ flask>=2.1.0
 oandapyV20>=0.7.0
 qlib>=0.6.9
 rich>=12.0.0
+gym>=0.21.0
+stable-baselines3>=1.6.0
+ta>=0.9.0
+finrl>=0.3.2
