@@ -79,8 +79,11 @@ def add_technical_indicators(df):
     df.dropna(inplace=True)
     return df
 
-def train_model(train_data, timesteps=10000):
-    env_train = forex_env.ForexTradingEnv(data_sequences=train_data)
+def train_model(train_data, timesteps=50000, stop_loss_percent=0.02):
+    env_train = forex_env.ForexTradingEnv(
+        data_sequences=train_data,
+        stop_loss_percent=stop_loss_percent
+    )
     agent = DRLAgent(env=env_train)
     model = agent.get_model("ppo")
     trained_model = agent.train_model(model=model, tb_log_name='ppo', total_timesteps=timesteps)
@@ -97,14 +100,52 @@ def test_model(test_data, model):
         total_reward += reward
     return total_reward
 
-def trade_model(trade_data, model):
-    env_trade = forex_env.ForexTradingEnv(data_sequences=trade_data)
-    obs, info = env_trade.reset()
-    done = False
-    while not done:
-        action, _states = model.predict(np.array(obs))
-        obs, reward, done, truncated, info = env_trade.step(action)
-        env_trade.render()
+def check_performance(env, threshold=0.9):
+    """
+    Evaluate model performance. If performance is below threshold, return False.
+    Replace this logic with your own performance metrics.
+    """
+    performance_score = 1.0  # Stub for actual evaluation
+    return performance_score >= threshold
+
+def auto_retrain(instrument, granularity, start_date, end_date, access_token, timesteps=50000):
+    """
+    Retrain model by fetching new data and using FinRL's DRLAgent.
+    """
+    new_data = fetch_oanda_candles_range(
+        instrument=instrument,
+        start_date=start_date,
+        end_date=end_date,
+        granularity=granularity,
+        access_token=access_token
+    )
+    new_data = add_technical_indicators(new_data)
+    train_data = new_data[:int(0.8 * len(new_data))]
+    new_model = train_model(train_data, timesteps=timesteps)
+    return new_model
+
+def run_bot_with_monitoring(instrument, granularity, start_date, end_date, access_token):
+    """
+    Main loop that executes trades and checks performance regularly.
+    """
+    df = fetch_oanda_candles_range(
+        instrument=instrument,
+        start_date=start_date,
+        end_date=end_date,
+        access_token=access_token,
+        granularity=granularity
+    )
+    df = add_technical_indicators(df)
+    train_data = df[:int(0.8 * len(df))]
+    test_data = df[int(0.8 * len(df)):]
+
+    model = train_model(train_data)
+    while True:
+        test_reward = test_model(test_data, model)
+        if not check_performance(env=None):  # Pass appropriate env or data
+            print("Performance below threshold, retraining...")
+            model = auto_retrain(instrument, granularity, start_date, end_date, access_token)
+        # Insert actual trade execution calls here
 
 # Example usage
 instrument = 'EUR_USD'
@@ -113,18 +154,4 @@ start_date = '2019-01-01T00:00:00Z'
 end_date = '2024-12-31T00:00:00Z'
 access_token = 'a15df916d468a21855b25932c59b6947-de38c8e63794cf1d040c170d1ca6df24'
 
-df = fetch_oanda_candles_range(instrument=instrument, start_date=start_date, end_date=end_date, access_token=access_token, granularity=granularity)
-
-# Add technical indicators
-df = add_technical_indicators(df)
-
-# Split data into train, test, and trade sets
-train_data = df[:int(0.8*len(df))]
-test_data = df[int(0.8*len(df)):]
-
-# Train model
-model = train_model(train_data)
-
-# Test model
-test_reward = test_model(test_data, model)
-print(f"Test Reward: {test_reward}")
+run_bot_with_monitoring(instrument, granularity, start_date, end_date, access_token)
