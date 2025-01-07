@@ -1,28 +1,130 @@
-import sys
-from src.config_utils import load_config, validate_config
-from src.server import run_server
-from src.account_details import update_live_display
-# from src.data_fetcher import fetch_historical_data (if you want to call from main)
-# from src.oanda_client import fetch_instrument_list
-# ... etc.
+import oandapyV20
+import oandapyV20.endpoints.instruments as instruments
+import pandas as pd
+import numpy as np
+import matplotlib
+import matplotlib.pyplot as plt
+import warnings
+warnings.filterwarnings("ignore")
+import datetime
+from stable_baselines3 import PPO
+import forex_env
+import ta  # Technical Analysis library
+from finrl.config_tickers import FX_TICKER
+from finrl.agents.stablebaselines3.models import DRLAgent
+from finrl.config import INDICATORS
 
-def main():
-    """
-    Main entry point for your trading bot.
-    """
-    config = load_config()
-    if not validate_config(config):
-        print("Exiting due to invalid credentials.")
-        sys.exit(1)
+def fetch_oanda_candles_chunk(instrument, from_time, to_time, granularity, access_token):
+    """Fetch up to `count` candles in one request."""
+    client = oandapyV20.API(access_token=access_token)
+    params = {
+        "from": pd.Timestamp(from_time).strftime('%Y-%m-%dT%H:%M:%SZ'),
+        "to": pd.Timestamp(to_time).strftime('%Y-%m-%dT%H:%M:%SZ'),      
+        "granularity": granularity
+    }
+    r = instruments.InstrumentsCandles(instrument=instrument, params=params)
+    resp = client.request(r)
+    
+    # Parse into DataFrame
+    data = resp["candles"]
+    df = pd.DataFrame([{
+        'time': candle['time'],
+        'open': float(candle['mid']['o']),
+        'high': float(candle['mid']['h']),
+        'low': float(candle['mid']['l']),
+        'close': float(candle['mid']['c']),
+        'volume': int(candle['volume'])
+    } for candle in data])
+    df['time'] = pd.to_datetime(df['time'])
+    df.set_index('time', inplace=True)
+    
+    return df
 
-    print("Starting trading bot...")
+def fetch_oanda_candles_range(instrument, start_date, end_date, granularity, access_token):
+    current_start = pd.Timestamp(start_date)
+    end_date = pd.Timestamp(end_date)
 
-    # Example usage: Start live display in a separate thread or process
-    # Or just run the server if you want the webhook to handle orders.
-    # update_live_display(config)
+    granularity_map = {
+        "M1": pd.Timedelta(minutes=1),
+        "M5": pd.Timedelta(minutes=5),
+        "M15": pd.Timedelta(minutes=15),
+        "H1": pd.Timedelta(hours=1),
+        "H4": pd.Timedelta(hours=4),
+        "D": pd.Timedelta(days=1)
+    }
+    granularity_freq = granularity_map.get(granularity, pd.Timedelta(minutes=1))
+    time_step = 5000 * granularity_freq
 
-    # Start the Flask server to receive webhook signals
-    run_server()
+    df = pd.DataFrame()
 
-if __name__ == "__main__":
-    main()
+    while current_start < end_date:
+        to_dt = min(current_start + time_step, end_date)  # Don't exceed end_date
+        df_chunk = fetch_oanda_candles_chunk(
+            instrument=instrument,
+            from_time=current_start,
+            to_time=to_dt,
+            granularity=granularity,
+            access_token=access_token,
+        )
+        df = pd.concat([df, df_chunk], ignore_index=True)
+        current_start = to_dt  # Move the current start forward
+    return df
+
+def add_technical_indicators(df):
+    df['rsi_14'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
+    df['dx_14'] = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], window=14).adx()
+    bb = ta.volatility.BollingerBands(df['close'], window=14)
+    df['bb_ub'] = bb.bollinger_hband()
+    df['bb_lb'] = bb.bollinger_lband()
+    df.dropna(inplace=True)
+    return df
+
+def train_model(train_data, timesteps=10000):
+    env_train = forex_env.ForexTradingEnv(data_sequences=train_data)
+    agent = DRLAgent(env=env_train)
+    model = agent.get_model("ppo")
+    trained_model = agent.train_model(model=model, tb_log_name='ppo', total_timesteps=timesteps)
+    return trained_model
+
+def test_model(test_data, model):
+    env_test = forex_env.ForexTradingEnv(data_sequences=test_data)
+    obs, info = env_test.reset()
+    done = False
+    total_reward = 0
+    while not done:
+        action, _states = model.predict(np.array(obs))
+        obs, reward, done, truncated, info = env_test.step(action)
+        total_reward += reward
+    return total_reward
+
+def trade_model(trade_data, model):
+    env_trade = forex_env.ForexTradingEnv(data_sequences=trade_data)
+    obs, info = env_trade.reset()
+    done = False
+    while not done:
+        action, _states = model.predict(np.array(obs))
+        obs, reward, done, truncated, info = env_trade.step(action)
+        env_trade.render()
+
+# Example usage
+instrument = 'EUR_USD'
+granularity = 'M5'
+start_date = '2019-01-01T00:00:00Z'
+end_date = '2024-12-31T00:00:00Z'
+access_token = 'a15df916d468a21855b25932c59b6947-de38c8e63794cf1d040c170d1ca6df24'
+
+df = fetch_oanda_candles_range(instrument=instrument, start_date=start_date, end_date=end_date, access_token=access_token, granularity=granularity)
+
+# Add technical indicators
+df = add_technical_indicators(df)
+
+# Split data into train, test, and trade sets
+train_data = df[:int(0.8*len(df))]
+test_data = df[int(0.8*len(df)):]
+
+# Train model
+model = train_model(train_data)
+
+# Test model
+test_reward = test_model(test_data, model)
+print(f"Test Reward: {test_reward}")
