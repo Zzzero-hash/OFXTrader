@@ -2,10 +2,11 @@ import gym
 from gym import spaces
 import numpy as np
 from functools import lru_cache
+import pandas as pd  # Add this import
 
 class OandaForexTradingEnv(gym.Env):
     """A custom environment for futures trading using technical indicators and market data."""
-    def __init__(self, data_sequences, instrument="EUR_USD", initial_capital=1000, leverage=50, window_size=10, seed=None, render_interval=1000, stop_loss_percent=0.02, frequent_trade_penalty=1.0, risk_per_trade=0.02):
+    def __init__(self, data_sequences, instrument="EUR_USD", initial_capital=1000, leverage=20, window_size=10, seed=None, render_interval=1000, stop_loss_percent=0.01, frequent_trade_penalty=1.0, risk_per_trade=0.01):
         """
         Initialize the environment.
         
@@ -20,6 +21,7 @@ class OandaForexTradingEnv(gym.Env):
         - stop_loss_percent: The percentage threshold for stop loss.
         - frequent_trade_penalty: The penalty for frequent trades.
         - risk_per_trade: The percentage of capital to risk per trade.
+        - options: Additional options for resetting the environment.
         """
         super(OandaForexTradingEnv, self).__init__()
         
@@ -31,7 +33,7 @@ class OandaForexTradingEnv(gym.Env):
         self.leverage = leverage
         self.window_size = window_size
         self.fee_rate = 0.0001
-        self.percent_to_trade = 0.1
+        self.percent_to_trade = 0.05  # Reduced position size
         self.position_size = 0
         self.trade_size = 0
         self.total_fees = 0
@@ -39,15 +41,38 @@ class OandaForexTradingEnv(gym.Env):
         self.position = None
         self.entry_price = 0
         self.render_interval = render_interval
-        self.stop_loss_percent = stop_loss_percent
+        self.stop_loss_percent = stop_loss_percent  # Tighter stop loss
         self.frequent_trade_penalty = frequent_trade_penalty
-        self.risk_per_trade = risk_per_trade
+        self.risk_per_trade = risk_per_trade  # Lower risk per trade
+        self.scaling_factor = 1e-4  # Add scaling factor for numerical stability
+        self.max_portfolio_value = 1e7  # Maximum allowed portfolio value
+        self.min_trade_size = 0.01  # Minimum trade size
+        self.max_trade_size = initial_capital * 5  # Maximum trade size
+        self.max_position_size = min(self.initial_capital * self.leverage * 0.95, 1e6)  # Limit maximum position size
+        self.position_size_limit = min(self.initial_capital * 10, 1e6)  # Reasonable position size limit
+        self.max_trades_per_day = 5  # Limit number of trades
+        self.min_profit_threshold = 0.001  # Minimum profit to consider trade
+        self.max_loss_threshold = -0.02  # Maximum loss before closing
+        self.trades_today = 0
+        self.last_trade_day = None
+        
+        # Risk management limits
+        self.max_drawdown_limit = 0.15  # 15% maximum drawdown
+        self.min_win_rate = 0.45  # Minimum required win rate
+        
+        # Trade tracking
+        self.trade_history = {
+            'wins': 0,
+            'losses': 0,
+            'current_drawdown': 0,
+            'max_drawdown': 0
+        }
         
         # Action space definition: 0 = Hold, 1 = BUY, 2 = SELL, 3 = CLOSE_BUY, 4 = CLOSE_SELL
         self.action_space = spaces.Discrete(5)
 
         # Observation space definition: Using the shape of the DataFrame to set the limits
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(window_size, data_sequences.shape[1]), dtype=np.float32)
+        self.observation_space = spaces.Box(low=-5, high=5, shape=(window_size, data_sequences.shape[1]), dtype=np.float32)
 
         self.log_interval = max(1, len(self.data_sequences) // 10)
 
@@ -58,6 +83,8 @@ class OandaForexTradingEnv(gym.Env):
         self.state_buffer = np.zeros((window_size, data_sequences.shape[1]), dtype=np.float32)
         self.data_array = data_sequences.values  # Convert DataFrame to numpy array once
 
+        self.current_step = 0
+        self.trade_log = []  # Initialize trade log
         self.reset(seed=seed)
 
     def seed(self, seed=None):
@@ -65,16 +92,87 @@ class OandaForexTradingEnv(gym.Env):
         return [seed]
     
     def calculate_percentage_change_from_entry(self, entry_price, current_price):
-        return abs(entry_price - current_price) / entry_price if entry_price != 0 else 0
+        """Calculate percentage change with protection against division by zero."""
+        if not entry_price or entry_price == 0:
+            return 0.0
+        return (current_price - entry_price) / entry_price
 
-    @lru_cache(maxsize=1024)  # Cache results for repeated calculations
+    @lru_cache(maxsize=1024)
     def apply_risk_management(self, current_price):
-        max_risk_amount = self.capital * self.risk_per_trade
-        return (max_risk_amount * self.leverage) / current_price if current_price > 0 else 0
+        """Calculate position size based on risk management rules with limits."""
+        if current_price <= 0:
+            return 0.0
         
+        # Calculate position size based on risk per trade
+        risk_amount = min(self.capital * self.risk_per_trade, self.max_trade_size)
+        position_size = np.clip(
+            (risk_amount / (current_price * self.stop_loss_percent)) * self.leverage,
+            self.min_trade_size,
+            self.position_size_limit
+        )
+        
+        return position_size
+
+    def check_stop_loss(self, current_price):
+        """Check if stop loss has been triggered and calculate profit/loss."""
+        if not self.position or not self.entry_price:
+            return False, 0.0
+
+        price_change_percent = (current_price - self.entry_price) / self.entry_price
+        
+        is_stopped = False
+        profit = 0.0
+
+        if self.position == 'Long':
+            is_stopped = price_change_percent < -self.stop_loss_percent
+            if is_stopped:
+                profit = self.position_size * price_change_percent
+        elif self.position == 'Short':
+            is_stopped = price_change_percent > self.stop_loss_percent
+            if is_stopped:
+                profit = self.position_size * -price_change_percent
+
+        return is_stopped, profit
+
+    def normalize_state(self, state):
+        """Normalize state values to prevent numerical instability."""
+        return np.clip(state / self.scaling_factor, -5, 5)
+
+    def normalize_reward(self, reward):
+        """Normalize reward to prevent extreme values."""
+        return np.clip(reward, -1, 1)
+
+    def calculate_reward(self, current_portfolio_value, previous_portfolio_value):
+        """Enhanced reward calculation with risk-adjusted metrics."""
+        # Calculate basic return
+        pnl = current_portfolio_value - previous_portfolio_value
+        pct_return = pnl / previous_portfolio_value
+        
+        # Calculate risk-adjusted reward
+        reward = pct_return
+        
+        # Penalize for high drawdown
+        if self.trade_history['current_drawdown'] > self.max_drawdown_limit:
+            reward *= 0.5
+        
+        # Penalize for poor win rate
+        win_rate = self.trade_history['wins'] / max(1, (self.trade_history['wins'] + self.trade_history['losses']))
+        if win_rate < self.min_win_rate:
+            reward *= 0.5
+        
+        # Penalize frequent trading
+        if self.trades_today >= self.max_trades_per_day:
+            reward *= 0.3
+        
+        # Scale and clip reward
+        reward = np.clip(reward * 100, -1, 1)
+        return reward
+
     def step(self, action):
         if action not in range(self.action_space.n):
-            raise ValueError(f"Invalid action: {action}. It should be within the range of 0 to {self.action_space.n - 1}.")
+            raise ValueError(f"Invalid action: {action}")
+
+        self.trade_size = 0
         try:
             if self.current_step < len(self.data_sequences):
                 current_price = self.data_sequences.iloc[self.current_step]['close']
@@ -88,7 +186,7 @@ class OandaForexTradingEnv(gym.Env):
                 done = True
                 truncated = False
                 print("Done reached!")
-            previous_portfolio_value = self.capital + self.position_size * current_price
+            previous_portfolio_value = min(self.capital + self.position_size * current_price, 1e9)
             reward = 0
             done = False
             truncated = False
@@ -96,10 +194,10 @@ class OandaForexTradingEnv(gym.Env):
 
             transaction_cost = 0
             slippage = 0
-    
+
             if action == 0:  # Hold
                 pass
-    
+
             elif action == 1 and not self.position:  # BUY
                 self.trade_size = self.capital * self.percent_to_trade
                 transaction_cost = self.trade_size * self.fee_rate
@@ -126,7 +224,7 @@ class OandaForexTradingEnv(gym.Env):
                                 'capital': float(self.capital),
                                 'transaction_cost': float(transaction_cost)
                             }
-    
+
             elif action == 2 and not self.position:  # SELL
                 self.trade_size = self.capital * self.percent_to_trade
                 transaction_cost = self.trade_size * self.fee_rate
@@ -153,7 +251,7 @@ class OandaForexTradingEnv(gym.Env):
                                 'capital': float(self.capital),
                                 'transaction_cost': float(transaction_cost)
                             }
-    
+
             elif action == 3 and self.position == 'Long':  # CLOSE_BUY
                 if self.position_size > 0:
                     percentage_change = self.calculate_percentage_change_from_entry(self.entry_price, current_price)
@@ -169,7 +267,7 @@ class OandaForexTradingEnv(gym.Env):
                     self.entry_price = 0
                 else:
                     reward = -1
-    
+
             elif action == 4 and self.position == 'Short':  # CLOSE_SELL
                 if self.position_size > 0:
                     percentage_change = self.calculate_percentage_change_from_entry(self.entry_price, current_price)
@@ -186,38 +284,26 @@ class OandaForexTradingEnv(gym.Env):
                 else:
                     reward = -1
 
-            if self.position == 'Long':
-                if (self.entry_price - current_price) / self.entry_price > self.stop_loss_percent:
-                    # Auto-close logic
-                    percentage_change = self.calculate_percentage_change_from_entry(self.entry_price, current_price)
-                    profit = percentage_change * self.position_size if current_price > self.entry_price else -percentage_change * self.position_size
-                    self.capital += profit + (self.position_size / self.leverage)
-                    self.total_profit += profit
-                    info = {'type': 'Auto Close Long', 
-                            'entry_price': float(self.entry_price), 
-                            'exit_price': float(current_price), 
-                            'profit': float(profit)}
+            # Replace the existing stop-loss logic with the new method
+            if self.position:
+                is_stopped, stop_loss_profit = self.check_stop_loss(current_price)
+                if is_stopped:
+                    self.capital += stop_loss_profit + (self.position_size / self.leverage)
+                    self.total_profit += stop_loss_profit
+                    info = {
+                        'type': f'Auto Close {self.position}', 
+                        'entry_price': float(self.entry_price), 
+                        'exit_price': float(current_price), 
+                        'profit': float(stop_loss_profit)
+                    }
                     self.position = None
                     self.position_size = 0
                     self.entry_price = 0
-            elif self.position == 'Short':
-                if (current_price - self.entry_price) / self.entry_price > self.stop_loss_percent:
-                    # Auto-close logic
-                    percentage_change = self.calculate_percentage_change_from_entry(self.entry_price, current_price)
-                    profit = -percentage_change * self.position_size if current_price > self.entry_price else percentage_change * self.position_size
-                    self.capital += profit + (self.position_size / self.leverage)
-                    self.total_profit += profit
-                    info = {'type': 'Auto Close Short', 
-                            'entry_price': float(self.entry_price), 
-                            'exit_price': float(current_price), 
-                            'profit': float(profit)}
-                    self.position = None
-                    self.position_size = 0
-                    self.entry_price = 0
+                    reward -= abs(stop_loss_profit) * 0.1  # Additional penalty for hitting stop-loss
 
             if action in [1, 2, 3, 4]:
                 # Apply penalty if trades are too frequent
-                if self.trade_log and (self.current_step - self.trade_log[-1].get('step', 0)) < 5:
+                if self.trade_log and (self.current_step - self.trade_log[-1].get('step', self.current_step)) < 5:
                     reward -= self.frequent_trade_penalty
                 if info:
                     info['step'] = self.current_step
@@ -225,7 +311,7 @@ class OandaForexTradingEnv(gym.Env):
                 
             self.peak_capital = max(self.peak_capital, self.capital)
             minimum_capital_threshold = self.initial_capital * 0.5
-    
+
             if self.capital < minimum_capital_threshold:
                 done = True
                 truncated = True
@@ -233,7 +319,7 @@ class OandaForexTradingEnv(gym.Env):
                 self.render()
             
             self.prev_price = current_price
-    
+
             self.current_step += 1
 
             unrealized_pnl = 0
@@ -246,20 +332,63 @@ class OandaForexTradingEnv(gym.Env):
 
             # Add unrealized PnL to reward
             reward += unrealized_pnl * 0.0001  # Scale factor
-    
+
             if self.current_step >= len(self.data_sequences):
                 done = True
                 print("Done reached!")
                 
+            # Check trade frequency
+            current_day = pd.Timestamp(self.data_sequences.index[self.current_step]).date()
+            if self.last_trade_day != current_day:
+                self.trades_today = 0
+                self.last_trade_day = current_day
+            
+            # Update trade history
+            if info.get('profit', 0) > 0:
+                self.trade_history['wins'] += 1
+            elif info.get('profit', 0) < 0:
+                self.trade_history['losses'] += 1
+            
+            # Calculate drawdown
+            self.trade_history['current_drawdown'] = (self.peak_capital - self.capital) / self.peak_capital
+            self.trade_history['max_drawdown'] = max(self.trade_history['max_drawdown'], 
+                                                   self.trade_history['current_drawdown'])
+            
+            # Calculate reward using new method
+            portfolio_value = self.capital + (self.position_size * current_price if self.position else 0)
+            reward = self.calculate_reward(portfolio_value, previous_portfolio_value)
+            
+            # Force close position if max loss exceeded
+            if self.trade_history['current_drawdown'] > self.max_drawdown_limit:
+                self.position = None
+                self.position_size = 0
+                done = True
+            
         except IndexError as e:
             print(f"IndexError: {e} at step: {self.current_step}")
             done = True
             truncated = False
 
-        current_portfolio_value = self.capital + self.position_size * current_price  # Track new value
-        reward = current_portfolio_value - previous_portfolio_value + reward
+        # Modify reward calculation
+        portfolio_value = np.clip(
+            self.capital + (self.position_size * current_price if self.position else 0),
+            0,
+            self.max_portfolio_value
+        )
 
-        self.state = self._next_observation() if not done else None
+        # Calculate percentage change with scaling
+        reward = ((portfolio_value - previous_portfolio_value) / 
+                 max(previous_portfolio_value, self.initial_capital)) * self.scaling_factor
+        
+        # Normalize reward
+        reward = self.normalize_reward(reward)
+
+        # Add penalty for excessive position size
+        if self.position_size > self.position_size_limit:
+            reward -= 0.1
+
+        # Normalize state
+        self.state = self.normalize_state(self._next_observation()) if not done else None
 
         if self.current_step % self.render_interval == 0 or done or truncated:
             self.render()
@@ -275,7 +404,6 @@ class OandaForexTradingEnv(gym.Env):
         self.total_fees = 0
         self.peak_capital = self.initial_capital
         self.capital = self.initial_capital
-        self.current_step = self.window_size  # Start after the initial window
         self.total_profit = 0
         self.position = None
         self.current_step = self.window_size  # Start after the initial window
@@ -284,16 +412,18 @@ class OandaForexTradingEnv(gym.Env):
         print(f"Env Reset Called!")
         
         return self.state, {}
-    
+
     def _next_observation(self):
+        """Extracted logic from reset for clarity."""
         try:
-            # Use pre-allocated buffer and numpy operations instead of DataFrame operations
-            self.state_buffer = self.data_array[self.current_step - self.window_size:self.current_step]
+            if self.current_step < self.window_size:
+                raise ValueError("current_step must be >= window_size")
+            self.state_buffer = self.data_array[self.current_step - self.window_size : self.current_step]
             return self.state_buffer
         except Exception as e:
             print(f"Error in _next_observation: {e}")
             raise e
-    
+
     def render(self, mode='human', close=False):
         print(f"Step: {self.current_step}, Position: {self.position}, Capital: {self.capital:.2f}, Peak Capital: {self.peak_capital:.2f}")
         if self.trade_log:
@@ -315,15 +445,40 @@ class OandaForexTradingEnv(gym.Env):
         losing_trades = [t for t in self.trade_log if t.get('profit', 0) < 0]
         trades_with_profit = [t for t in self.trade_log if t.get('profit') is not None]
         if trades_with_profit:
-            average_profit = sum(t.get('profit', 0) for t in trades_with_profit) / len(trades_with_profit)
-        else:
-            average_profit = 0.0
-    
-        print(f"Total Winning Trades: {len(winning_trades)}, Total Losing Trades: {len(losing_trades)}")
-        print(f"Average Profit per Trade: {average_profit:.2f}")
+            average_profit = sum([t['profit'] for t in trades_with_profit]) / len(trades_with_profit)
+            print(f"Total Winning Trades: {len(winning_trades)}, Total Losing Trades: {len(losing_trades)}")
+            print(f"Average Profit per Trade: {average_profit:.2f}")
 
     def close(self):
         self.data_sequences = None
+        self.instrument = None
+        self.initial_capital = 0
+        self.capital = 0
+        self.leverage = 0
+        self.window_size = 0
+        self.fee_rate = 0
+        self.percent_to_trade = 0
+        self.position_size = 0
+        self.trade_size = 0
+        self.total_fees = 0
+        self.total_profit = 0
+        self.position = None
+        self.entry_price = 0
+        self.render_interval = 0
+        self.stop_loss_percent = 0
+        self.frequent_trade_penalty = 0
+        self.risk_per_trade = 0
+        self.action_space = None
+        self.observation_space = None
+        self.log_interval = 0
+        self.np_random = None
+        self.state_buffer = None
+        self.data_array = None
+        self.current_step = 0
         self.trade_log = None
+        self.peak_capital = 0
+        self.peak_capital = 0
+        self.prev_price = 0
         self.state = None
-        pass
+        self.prev_price = 0
+        self.state = None
