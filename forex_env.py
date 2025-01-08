@@ -174,18 +174,14 @@ class OandaForexTradingEnv(gym.Env):
 
         self.trade_size = 0
         try:
-            if self.current_step < len(self.data_sequences):
-                current_price = self.data_sequences.iloc[self.current_step]['close']
-            else:
+            if self.current_step >= len(self.data_sequences):
                 done = True
+                reward = 0
                 truncated = False
-                print("Done reached!")
-                return self.state, 0, done, truncated, {}
+                info = {'reason': 'End of data'}
+                return self.state, reward, done, truncated, info
 
-            if self.current_step >= len(self.data_sequences) - 1:
-                done = True
-                truncated = False
-                print("Done reached!")
+            current_price = self.data_sequences.iloc[self.current_step]['close']
             previous_portfolio_value = min(self.capital + self.position_size * current_price, 1e9)
             reward = 0
             done = False

@@ -6,9 +6,9 @@ import warnings
 warnings.filterwarnings("ignore")
 import datetime
 from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import BaseCallback
 import forex_env
 import ta  # Technical Analysis library
-from finrl.config_tickers import FX_TICKER
 from finrl.agents.stablebaselines3.models import DRLAgent
 from finrl.config import INDICATORS
 import optuna
@@ -298,12 +298,13 @@ def run_bot_with_monitoring(instrument, granularity, start_date, end_date, acces
 
 def hyperparam_tuning(train_data, n_trials=10):
     def objective(trial):
-        # More conservative parameter ranges
-        learning_rate = trial.suggest_loguniform('learning_rate', 1e-5, 5e-4)
-        n_steps = trial.suggest_int('n_steps', 256, 1024)
-        gamma = trial.suggest_float('gamma', 0.97, 0.995)
-        ent_coef = trial.suggest_float('ent_coef', 1e-5, 1e-3)
+        # Narrow down parameter ranges
+        learning_rate = trial.suggest_loguniform('learning_rate', 1e-5, 1e-4)
+        n_steps = trial.suggest_int('n_steps', 256, 512)
+        gamma = trial.suggest_float('gamma', 0.98, 0.995)
+        ent_coef = trial.suggest_float('ent_coef', 1e-5, 1e-4)
         batch_size = trial.suggest_categorical('batch_size', [128, 256])
+        clip_range = trial.suggest_float('clip_range', 0.1, 0.3)
         
         # Additional PPO parameters
         max_grad_norm = trial.suggest_float('max_grad_norm', 0.3, 0.7)
@@ -311,9 +312,9 @@ def hyperparam_tuning(train_data, n_trials=10):
         
         env_train = forex_env.OandaForexTradingEnv(
             data_sequences=train_data,
-            stop_loss_percent=0.01,  # Tighter stop loss
+            stop_loss_percent=0.005,  # Further reduced stop loss
             leverage=20,  # Reduced leverage
-            risk_per_trade=0.01  # Lower risk per trade
+            risk_per_trade=0.005  # Further reduced risk per trade
         )
         
         model = PPO(
@@ -324,14 +325,16 @@ def hyperparam_tuning(train_data, n_trials=10):
             gamma=gamma,
             ent_coef=ent_coef,
             batch_size=batch_size,
+            clip_range=clip_range,
             max_grad_norm=max_grad_norm,
             vf_coef=vf_coef,
             policy_kwargs={"net_arch": [128, 128]},  # Deeper network
             device=device
         )
         
-        # Train model
-        model.learn(total_timesteps=20000)
+        # Train model with early stopping
+        callback = EarlyStoppingCallback(patience=5, min_delta=0.01)
+        model.learn(total_timesteps=20000, callback=callback)
         train_reward, _ = test_model(train_data, model)
         return train_reward
 
@@ -341,7 +344,12 @@ def hyperparam_tuning(train_data, n_trials=10):
     logging.info("Best hyperparams: %s", best_params)
     
     # Retrain final model with best parameters
-    final_env = forex_env.OandaForexTradingEnv(data_sequences=train_data)
+    final_env = forex_env.OandaForexTradingEnv(
+        data_sequences=train_data,
+        stop_loss_percent=0.005,  # Further reduced stop loss
+        leverage=20,  # Reduced leverage
+        risk_per_trade=0.005  # Further reduced risk per trade
+    )
     final_model = PPO(
         "MlpPolicy",
         final_env,
@@ -350,6 +358,7 @@ def hyperparam_tuning(train_data, n_trials=10):
         gamma=best_params['gamma'],
         ent_coef=best_params['ent_coef'],
         batch_size=best_params['batch_size'],
+        clip_range=best_params['clip_range'],
         max_grad_norm=best_params['max_grad_norm'],
         vf_coef=best_params['vf_coef'],
         policy_kwargs={"net_arch": [128, 128]},  # Deeper network
@@ -357,6 +366,27 @@ def hyperparam_tuning(train_data, n_trials=10):
     )
     final_model.learn(total_timesteps=50000)
     return final_model
+
+class EarlyStoppingCallback(BaseCallback):
+    def __init__(self, patience: int, min_delta: float, verbose: int = 0):
+        super(EarlyStoppingCallback, self).__init__(verbose)
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_mean_reward = -np.inf
+        self.no_improvement_steps = 0
+
+    def _on_step(self) -> bool:
+        mean_reward = np.mean(self.locals['rewards'])
+        if mean_reward > self.best_mean_reward + self.min_delta:
+            self.best_mean_reward = mean_reward
+            self.no_improvement_steps = 0
+        else:
+            self.no_improvement_steps += 1
+
+        if self.no_improvement_steps >= self.patience:
+            print("Early stopping triggered")
+            return False
+        return True
 
 # Example usage
 if __name__ == "__main__":
