@@ -60,7 +60,10 @@ class OandaForexTradingEnv(gym.Env):
         self.min_win_rate = 0.45  # Minimum required win rate
         
         # Trade tracking
-        self.trade_history = {
+        self.trade_log = []  # List to store individual trade information
+        
+        # Initialize trade_metrics as a dictionary
+        self.trade_metrics = {
             'wins': 0,
             'losses': 0,
             'current_drawdown': 0,
@@ -138,15 +141,6 @@ class OandaForexTradingEnv(gym.Env):
         """Normalize reward to prevent extreme values."""
         return np.clip(reward, -1, 1)
 
-    def calculate_reward(self, current_portfolio_value, previous_portfolio_value):
-        """Simplified reward calculation."""
-        pnl = current_portfolio_value - previous_portfolio_value
-        pct_return = pnl / previous_portfolio_value
-        
-        # Simplified reward without additional penalties
-        reward = pct_return * 100  # Scale reward
-        return np.clip(reward, -1, 1)
-
     def step(self, action):
         if action not in range(self.action_space.n):
             raise ValueError(f"Invalid action: {action}")
@@ -170,7 +164,8 @@ class OandaForexTradingEnv(gym.Env):
                 self.trade_size = self.capital * self.percent_to_trade
                 transaction_cost = self.trade_size * self.fee_rate
                 slippage = self.trade_size * 0.0002
-                max_margin = self.apply_risk_management(current_price) * current_price
+                risk_management_result = self.apply_risk_management(current_price)
+                max_margin = risk_management_result * current_price
                 required_margin = min(max_margin, (self.trade_size * self.leverage) / self.leverage)
                 # Check if we have enough capital to open the trade
                 if self.capital < (transaction_cost + required_margin + slippage):
@@ -187,11 +182,10 @@ class OandaForexTradingEnv(gym.Env):
                     self.capital -= transaction_cost + required_margin
                     self.total_fees += transaction_cost
                     info = {'type': 'BUY',
-                                'entry_price': float(current_price),
-                                'position_size': float(self.position_size),
-                                'capital': float(self.capital),
-                                'transaction_cost': float(transaction_cost)
-                            }
+                            'entry_price': float(current_price),
+                            'position_size': float(self.position_size),
+                            'capital': float(self.capital),
+                            'transaction_cost': float(transaction_cost)}
 
             elif action == 2 and not self.position:  # SELL
                 self.trade_size = self.capital * self.percent_to_trade
@@ -213,12 +207,11 @@ class OandaForexTradingEnv(gym.Env):
                     self.entry_price = current_price
                     self.capital -= transaction_cost + required_margin
                     self.total_fees += transaction_cost
-                    info = {'type': 'SELL', 
-                                'entry_price': float(current_price),
-                                'position_size': float(self.position_size),
-                                'capital': float(self.capital),
-                                'transaction_cost': float(transaction_cost)
-                            }
+                    info = {'type': 'SELL',
+                            'entry_price': float(current_price),
+                            'position_size': float(self.position_size),
+                            'capital': float(self.capital),
+                            'transaction_cost': float(transaction_cost)}
 
             elif action == 3 and self.position == 'Long':  # CLOSE_BUY
                 if self.position_size > 0:
@@ -226,9 +219,9 @@ class OandaForexTradingEnv(gym.Env):
                     profit = percentage_change * self.position_size if current_price > self.entry_price else -percentage_change * self.position_size
                     self.capital += profit + (self.position_size / self.leverage)
                     self.total_profit += profit
-                    info = {'type': 'CLOSE_BUY', 
-                            'entry_price': float(self.entry_price), 
-                            'exit_price': float(current_price), 
+                    info = {'type': 'CLOSE_BUY',
+                            'entry_price': float(self.entry_price),
+                            'exit_price': float(current_price),
                             'profit': float(profit)}
                     self.position = None
                     self.position_size = 0
@@ -242,9 +235,9 @@ class OandaForexTradingEnv(gym.Env):
                     profit = -percentage_change * self.position_size if current_price > self.entry_price else percentage_change * self.position_size
                     self.capital += profit + (self.position_size / self.leverage)
                     self.total_profit += profit
-                    info = {'type': 'CLOSE_SELL', 
-                            'entry_price': float(self.entry_price), 
-                            'exit_price': float(current_price), 
+                    info = {'type': 'CLOSE_SELL',
+                            'entry_price': float(self.entry_price),
+                            'exit_price': float(current_price),
                             'profit': float(profit)}
                     self.position = None
                     self.position_size = 0
@@ -259,20 +252,15 @@ class OandaForexTradingEnv(gym.Env):
                     self.capital += stop_loss_profit + (self.position_size / self.leverage)
                     self.total_profit += stop_loss_profit
                     info = {
-                        'type': f'Auto Close {self.position}', 
-                        'entry_price': float(self.entry_price), 
-                        'exit_price': float(current_price), 
+                        'type': f'Auto Close {self.position}',
+                        'entry_price': float(self.entry_price),
+                        'exit_price': float(current_price),
                         'profit': float(stop_loss_profit)
                     }
                     self.position = None
                     self.position_size = 0
                     self.entry_price = 0
 
-            if action in [1, 2, 3, 4]:
-                if info:
-                    info['step'] = self.current_step
-                    self.trade_log.append(info)
-                
             self.peak_capital = max(self.peak_capital, self.capital)
             minimum_capital_threshold = self.initial_capital * 0.5
 
@@ -281,7 +269,6 @@ class OandaForexTradingEnv(gym.Env):
                 truncated = True
                 print("Truncated threshold reached!")
                 self.render()
-            
             self.prev_price = current_price
 
             unrealized_pnl = 0
@@ -294,39 +281,39 @@ class OandaForexTradingEnv(gym.Env):
 
             # Add unrealized PnL to reward
             reward += unrealized_pnl * 0.0001  # Scale factor
-                
+
             # Check trade frequency
             current_day = pd.Timestamp(self.data_sequences.index[self.current_step]).date()
             if self.last_trade_day != current_day:
                 self.trades_today = 0
                 self.last_trade_day = current_day
-            
-            # Update trade history
+
+            # Update trade metrics
             if info.get('profit', 0) > 0:
-                self.trade_history['wins'] += 1
+                self.trade_metrics['wins'] += 1
             elif info.get('profit', 0) < 0:
-                self.trade_history['losses'] += 1
-            
+                self.trade_metrics['losses'] += 1
+
+            # Append trade info to trade_log
+            if info:
+                self.trade_log.append(info)
+
             # Calculate drawdown
-            self.trade_history['current_drawdown'] = (self.peak_capital - self.capital) / self.peak_capital
-            self.trade_history['max_drawdown'] = max(self.trade_history['max_drawdown'], 
-                                                   self.trade_history['current_drawdown'])
-            
-            # Calculate reward using new method
-            portfolio_value = self.capital + (self.position_size * current_price if self.position else 0)
-            reward = self.calculate_reward(portfolio_value, previous_portfolio_value)
-            
+            self.trade_metrics['current_drawdown'] = (self.peak_capital - self.capital) / self.peak_capital
+            self.trade_metrics['max_drawdown'] = max(self.trade_metrics['max_drawdown'],
+                                                     self.trade_metrics['current_drawdown'])
+
             # Force close position if max loss exceeded
-            if self.trade_history['current_drawdown'] > self.max_drawdown_limit:
+            if self.trade_metrics['current_drawdown'] > self.max_drawdown_limit:
                 self.position = None
                 self.position_size = 0
                 done = True
-            
+
         except IndexError as e:
-            print(f"IndexError: {e} at step: {self.current_step}")
             done = True
             truncated = False
-            self.current_step = len(self.data_sequences) - 1  # Ensure current_step is within bounds
+            info = {'error': f"IndexError: {e} at step: {self.current_step}"}
+            self.current_step = max(0, len(self.data_sequences) - 1)  # Ensure current_step is within bounds
 
         # Modify reward calculation
         portfolio_value = np.clip(
@@ -336,9 +323,9 @@ class OandaForexTradingEnv(gym.Env):
         )
 
         # Calculate percentage change with scaling
-        reward = ((portfolio_value - previous_portfolio_value) / 
-                 max(previous_portfolio_value, self.initial_capital)) * self.scaling_factor
-        
+        reward = ((portfolio_value - previous_portfolio_value) /
+                  max(previous_portfolio_value, self.initial_capital)) * self.scaling_factor
+
         # Normalize reward
         reward = self.normalize_reward(reward)
 
@@ -355,13 +342,16 @@ class OandaForexTradingEnv(gym.Env):
             self.current_step = len(self.data_sequences) - 1  # Ensure current_step is within bounds
 
         # Normalize state
-        self.state = self.normalize_state(self._next_observation()) if not done else None
+        if not done:
+            self.state = self.normalize_state(self._next_observation())
+        else:
+            self.state = None
 
         if self.current_step % self.render_interval == 0 or done or truncated:
             self.render()
 
         return self.state, reward, done, truncated, info
-    
+
     def reset(self, *, seed=None, options=None):
         if seed is not None:
             self.seed(seed)

@@ -1,5 +1,6 @@
 import oandapyV20
 import oandapyV20.endpoints.instruments as instruments
+import oandapyV20.endpoints.accounts as accounts  # Add this import
 import pandas as pd
 import numpy as np
 import warnings
@@ -21,6 +22,10 @@ import logging
 import gym
 import subprocess
 import sys
+import json
+import os
+from stable_baselines3.common.utils import get_latest_run_id
+import hashlib
 
 logging.basicConfig(level=logging.INFO)
 
@@ -40,6 +45,31 @@ except FileNotFoundError:
 # Add dynamic device assignment
 device = 'cuda' if cuda_available else 'cpu'
 logging.info(f"Using device: {device}")
+
+# Create a directory to save the trained model
+model_save_path = "trained_models"
+os.makedirs(model_save_path, exist_ok=True)
+
+def list_available_models() -> List[str]:
+    """List all available pre-trained models."""
+    models = [f for f in os.listdir(model_save_path) if f.endswith('.zip')]
+    return models
+
+def generate_model_name(params: Dict[str, any]) -> str:
+    """Generate a unique model name based on training parameters."""
+    param_str = json.dumps(params, sort_keys=True)
+    param_hash = hashlib.md5(param_str.encode()).hexdigest()
+    return f"model_{param_hash}.zip"
+
+def load_model(model_name: str) -> PPO:
+    """Load a pre-trained model."""
+    model_file = os.path.join(model_save_path, model_name)
+    if os.path.exists(model_file):
+        model = PPO.load(model_file, device=device)
+        logging.info(f"Loaded model from {model_file}")
+        return model
+    else:
+        raise FileNotFoundError(f"Model file {model_file} not found.")
 
 @lru_cache(maxsize=32)
 def fetch_oanda_candles_chunk(instrument, from_time, to_time, granularity, access_token):
@@ -115,6 +145,12 @@ def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def train_model(train_data, timesteps=50000, stop_loss_percent=0.02, use_optuna=False, n_trials=10):
+    params = {
+        "timesteps": timesteps,
+        "stop_loss_percent": stop_loss_percent,
+        "use_optuna": use_optuna,
+        "n_trials": n_trials
+    }
     if use_optuna:
         return hyperparam_tuning(train_data, n_trials=n_trials)
     
@@ -131,6 +167,16 @@ def train_model(train_data, timesteps=50000, stop_loss_percent=0.02, use_optuna=
     agent = DRLAgent(env=env_train)
     model = agent.get_model("ppo", device=device)  # Use dynamic device
     trained_model = agent.train_model(model=model, tb_log_name='ppo', total_timesteps=timesteps)
+    
+    # Save the trained model
+    model_name = generate_model_name(params)
+    model_file = os.path.join(model_save_path, model_name)
+    try:
+        trained_model.save(model_file)
+        logging.info(f"Model saved to {model_file}")
+    except Exception as e:
+        logging.error(f"Failed to save model to {model_file}: {e}")
+    
     return trained_model
 
 def calculate_sharpe_ratio(rewards: List[float], risk_free_rate: float = 0.0) -> float:
@@ -332,7 +378,7 @@ def auto_retrain(instrument: str, granularity: str, start_date: str, end_date: s
     new_model = train_model(train_data, timesteps=timesteps, use_optuna=use_optuna, n_trials=n_trials)
     return new_model
 
-def run_bot_with_monitoring(instrument: str, granularity: str, start_date: str, end_date: str, access_token: str, use_optuna: bool = False, n_trials: int = 10):
+def run_bot_with_monitoring(instrument: str, granularity: str, start_date: str, end_date: str, access_token: str, use_optuna: bool = False, n_trials: int = 10, model_name: str = None):
     """
     Main loop that executes trades and checks performance regularly.
 
@@ -344,6 +390,7 @@ def run_bot_with_monitoring(instrument: str, granularity: str, start_date: str, 
     access_token (str): The access token for OANDA API.
     use_optuna (bool): Whether to use Optuna for hyperparameter tuning. Default is False.
     n_trials (int): The number of trials for Optuna hyperparameter tuning. Default is 10.
+    model_name (str): The name of the pre-trained model to load. If None, train a new model.
     """
     df = fetch_oanda_candles_range(
         instrument=instrument,
@@ -355,7 +402,12 @@ def run_bot_with_monitoring(instrument: str, granularity: str, start_date: str, 
     df = add_technical_indicators(df)
     train_data = df[:int(0.8 * len(df))]
     test_data = df[int(0.8 * len(df)):]
-    model = train_model(train_data, use_optuna=use_optuna, n_trials=n_trials)
+
+    if model_name:
+        model = load_model(model_name)
+    else:
+        model = train_model(train_data, use_optuna=use_optuna, n_trials=n_trials)
+
     while True:
         test_reward, metrics = test_model(test_data, model)
         break  # Temporary break for testing
@@ -436,15 +488,74 @@ def hyperparam_tuning(train_data: pd.DataFrame, n_trials: int = 10) -> PPO:
         policy_kwargs={"net_arch": [128, 128]},  # Deeper network
         device=device  # Use dynamic device
     )
-    final_model.learn(total_timesteps=50000)
+    final_model.learn(total_timesteps=100000)
+    
+    # Save the final model with best parameters
+    model_name = generate_model_name(best_params)
+    model_file = os.path.join(model_save_path, model_name)
+    try:
+        final_model.save(model_file)
+        logging.info(f"Model with best hyperparameters saved to {model_file}")
+    except Exception as e:
+        logging.error(f"Failed to save model with best hyperparameters to {model_file}: {e}")
+    
     return final_model
+
+def validate_credentials(access_token: str, account_id: str) -> bool:
+    """Validate the provided OANDA credentials."""
+    try:
+        client = oandapyV20.API(access_token=access_token)
+        r = accounts.AccountDetails(account_id)  # Use the correct import
+        client.request(r)
+        return True
+    except Exception as e:
+        logging.error(f"Invalid credentials: {e}")
+        return False
+
+def get_credentials_from_user() -> Dict[str, str]:
+    """Prompt the user to enter their OANDA account ID and access token."""
+    account_id = input("Enter your OANDA account ID: ")
+    access_token = input("Enter your OANDA access token: ")
+    return {"account_id": account_id, "access_token": access_token}
+
+def load_or_create_config(config_path: str = "config.json") -> Dict[str, str]:
+    """Load the config file if it exists, otherwise create it by prompting the user for credentials."""
+    if os.path.exists(config_path):
+        with open(config_path, "r") as file:
+            config = json.load(file)
+            if validate_credentials(config["access_token"], config["account_id"]):
+                return config
+            else:
+                logging.error("Stored credentials are invalid. Please re-enter your credentials.")
+    
+    # Prompt the user for credentials if the file does not exist or credentials are invalid
+    while True:
+        config = get_credentials_from_user()
+        if validate_credentials(config["access_token"], config["account_id"]):
+            with open(config_path, "w") as file:
+                json.dump(config, file)
+            return config
+        else:
+            logging.error("Invalid credentials. Please try again.")
 
 # Example usage
 if __name__ == "__main__":
-    instrument = 'EUR_USD'
-    granularity = 'M5'
-    start_date = '2020-01-01T00:00:00Z'
-    end_date = '2024-12-31T00:00:00Z'
-    access_token = 'a15df916d468a21855b25932c59b6947-de38c8e63794cf1d040c170d1ca6df24'
+    config = load_or_create_config()
+    instrument = input("Enter trading instrument (e.g., 'EUR_USD'): ")
+    granularity = input("Enter granularity (e.g., 'H1'): ")
+    start_date = (datetime.datetime.now() - datetime.timedelta(days=3650)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    end_date = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ')
+    access_token = config["access_token"]
+    account_id = config["account_id"]
+    
+    available_models = list_available_models()
+    if available_models:
+        print("Available pre-trained models:")
+        for model in available_models:
+            print(f"- {model}")
+    else:
+        print("No pre-trained models available.")
+    
+    model_name = input("Enter the name of the pre-trained model to load (or press Enter to train a new one): ")
 
-    run_bot_with_monitoring(instrument, granularity, start_date, end_date, access_token, use_optuna=True, n_trials=10)
+    run_bot_with_monitoring(instrument, granularity, start_date, end_date, access_token, use_optuna=True, n_trials=10, model_name=model_name if model_name else None)
