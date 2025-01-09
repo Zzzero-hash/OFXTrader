@@ -70,7 +70,7 @@ def load_model(model_name: str) -> PPO:
     else:
         raise FileNotFoundError(f"Model file {model_file} not found.")
 
-def train_model(train_data, use_optuna=False, n_trials=10, timesteps=50000, stop_loss_percent=0.02):
+def train_model(train_data, use_optuna=True, n_trials=10, timesteps=50000, stop_loss_percent=0.02):
     params = {
         "timesteps": timesteps,
         "stop_loss_percent": stop_loss_percent,
@@ -78,7 +78,7 @@ def train_model(train_data, use_optuna=False, n_trials=10, timesteps=50000, stop
         "n_trials": n_trials
     }
     if use_optuna:
-        return hyperparam_tuning(train_data, n_trials=n_trials)
+        model = hyperparam_tuning(train_data, n_trials=n_trials)
     
     if device == 'cuda':
         # Optimize CUDA settings
@@ -91,14 +91,6 @@ def train_model(train_data, use_optuna=False, n_trials=10, timesteps=50000, stop
         stop_loss_percent=stop_loss_percent
     )
     agent = DRLAgent(env=env_train)
-    model = PPO(
-        "MlpPolicy",
-        env_train,
-        tensorboard_log="./tensorboard_logs/",
-        verbose=1,
-        device=device
-        # ...additional PPO params...
-    )
     model.learn(total_timesteps=timesteps, tb_log_name="PPO_run")
     # Save the trained model
     model_name = generate_model_name(params)

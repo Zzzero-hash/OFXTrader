@@ -57,8 +57,27 @@ if __name__ == "__main__":
         else:
             # Handle training if no pre-trained model is selected
             from train import train_model
-            # Fetch and preprocess data as needed
-            # ...existing training code...
+            print("No pre-trained model selected. Starting training process...")
+            model_name = train_model(instrument, granularity, start_date, end_date)
+            print(f"Training completed. Model saved as {model_name}.")
+
+            trading = input("Would you like to start live trading with the trained model? [y/n]: ")
+            if trading.lower() == 'y':
+                from trade import TradingBot
+                bot = TradingBot(
+                    model_name=model_name,
+                    instrument=instrument,
+                    granularity=granularity,
+                    start_date=start_date,
+                    end_date=end_date,
+                    access_token=access_token,
+                    max_profit_percent=args.max_profit_percent,
+                    max_loss_percent=args.max_loss_percent
+                )
+                bot.start_live_trading()
+            else:
+                print("Exiting program...")
+                
     except Exception as e:
         logging.error(f"An error occurred while running the bot: {e}")
         print(f"An error occurred while running the bot: {e}")
