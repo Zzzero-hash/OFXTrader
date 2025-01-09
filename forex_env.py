@@ -3,6 +3,7 @@ from gym import spaces
 import numpy as np
 from functools import lru_cache
 import pandas as pd  # Add this import
+import logging
 
 class OandaForexTradingEnv(gym.Env):
     """A custom environment for futures trading using technical indicators and market data."""
@@ -104,6 +105,7 @@ class OandaForexTradingEnv(gym.Env):
     def apply_risk_management(self, current_price):
         """Simplified risk management rules."""
         if current_price <= 0:
+            logging.warning("Current price is non-positive. Skipping risk management.")
             return 0.0
         
         # Simplified position size calculation
@@ -117,19 +119,20 @@ class OandaForexTradingEnv(gym.Env):
         if not self.position or not self.entry_price:
             return False, 0.0
 
-        price_change_percent = (current_price - self.entry_price) / self.entry_price
-        
+        price_change_percent = self.calculate_percentage_change_from_entry(self.entry_price, current_price)
         is_stopped = False
         profit = 0.0
 
         if self.position == 'Long':
             is_stopped = price_change_percent < -self.stop_loss_percent
             if is_stopped:
-                profit = self.position_size * price_change_percent
+                profit = (current_price - self.entry_price) * self.position_size
+                self.close_position()
         elif self.position == 'Short':
             is_stopped = price_change_percent > self.stop_loss_percent
             if is_stopped:
-                profit = self.position_size * -price_change_percent
+                profit = (self.entry_price - current_price) * self.position_size
+                self.close_position()
 
         return is_stopped, profit
 
@@ -161,89 +164,38 @@ class OandaForexTradingEnv(gym.Env):
                 pass
 
             elif action == 1 and not self.position:  # BUY
-                self.trade_size = self.capital * self.percent_to_trade
-                transaction_cost = self.trade_size * self.fee_rate
-                slippage = self.trade_size * 0.0002
-                risk_management_result = self.apply_risk_management(current_price)
-                max_margin = risk_management_result * current_price
-                required_margin = min(max_margin, (self.trade_size * self.leverage) / self.leverage)
-                # Check if we have enough capital to open the trade
-                if self.capital < (transaction_cost + required_margin + slippage):
-                    reward -= 1.0  # Lower penalty for invalid trade attempt
-                    info = {'type': 'Invalid Trade', 'reason': 'Insufficient Margin'}
-                else:
+                position_size = self.apply_risk_management(current_price)
+                if position_size > 0:
                     self.position = 'Long'
-                    self.trade_size = self.capital * self.percent_to_trade
-                    transaction_cost = self.trade_size * self.fee_rate
-                    slippage = self.trade_size * 0.0002
-                    self.position_size = self.trade_size * self.leverage
-                    required_margin = self.position_size / self.leverage
                     self.entry_price = current_price
-                    self.capital -= transaction_cost + required_margin
-                    self.total_fees += transaction_cost
-                    info = {'type': 'BUY',
-                            'entry_price': float(current_price),
-                            'position_size': float(self.position_size),
-                            'capital': float(self.capital),
-                            'transaction_cost': float(transaction_cost)}
+                    self.position_size = position_size
+                    self.trade_size += 1
+                    self.trade_log.append({'type': 'BUY', 'price': current_price, 'size': position_size})
+                    logging.info(f"Executed BUY at {current_price} with size {position_size}")
 
             elif action == 2 and not self.position:  # SELL
-                self.trade_size = self.capital * self.percent_to_trade
-                transaction_cost = self.trade_size * self.fee_rate
-                slippage = self.trade_size * 0.0002
-                max_margin = self.apply_risk_management(current_price) * current_price
-                required_margin = min(max_margin, (self.trade_size * self.leverage) / self.leverage)
-                # Check if we have enough capital to open the trade
-                if self.capital < (transaction_cost + required_margin + slippage):
-                    reward -= 1.0  # Lower penalty for invalid trade attempt
-                    info = {'type': 'Invalid Trade', 'reason': 'Insufficient Margin'}
-                else:
+                position_size = self.apply_risk_management(current_price)
+                if position_size > 0:
                     self.position = 'Short'
-                    self.trade_size = self.capital * self.percent_to_trade
-                    transaction_cost = self.trade_size * self.fee_rate
-                    slippage = self.trade_size * 0.0002
-                    self.position_size = self.trade_size * self.leverage
-                    required_margin = self.position_size / self.leverage
                     self.entry_price = current_price
-                    self.capital -= transaction_cost + required_margin
-                    self.total_fees += transaction_cost
-                    info = {'type': 'SELL',
-                            'entry_price': float(current_price),
-                            'position_size': float(self.position_size),
-                            'capital': float(self.capital),
-                            'transaction_cost': float(transaction_cost)}
+                    self.position_size = position_size
+                    self.trade_size += 1
+                    self.trade_log.append({'type': 'SELL', 'price': current_price, 'size': position_size})
+                    logging.info(f"Executed SELL at {current_price} with size {position_size}")
 
             elif action == 3 and self.position == 'Long':  # CLOSE_BUY
-                if self.position_size > 0:
-                    percentage_change = self.calculate_percentage_change_from_entry(self.entry_price, current_price)
-                    profit = percentage_change * self.position_size if current_price > self.entry_price else -percentage_change * self.position_size
-                    self.capital += profit + (self.position_size / self.leverage)
-                    self.total_profit += profit
-                    info = {'type': 'CLOSE_BUY',
-                            'entry_price': float(self.entry_price),
-                            'exit_price': float(current_price),
-                            'profit': float(profit)}
-                    self.position = None
-                    self.position_size = 0
-                    self.entry_price = 0
-                else:
-                    reward = -1
+                is_stopped, profit = self.check_stop_loss(current_price)
+                if not is_stopped:
+                    profit = (current_price - self.entry_price) * self.position_size
+                    self.close_position()
+                    logging.info(f"Closed BUY at {current_price} with profit {profit}")
 
             elif action == 4 and self.position == 'Short':  # CLOSE_SELL
-                if self.position_size > 0:
-                    percentage_change = self.calculate_percentage_change_from_entry(self.entry_price, current_price)
-                    profit = -percentage_change * self.position_size if current_price > self.entry_price else percentage_change * self.position_size
-                    self.capital += profit + (self.position_size / self.leverage)
-                    self.total_profit += profit
-                    info = {'type': 'CLOSE_SELL',
-                            'entry_price': float(self.entry_price),
-                            'exit_price': float(current_price),
-                            'profit': float(profit)}
-                    self.position = None
-                    self.position_size = 0
-                    self.entry_price = 0
-                else:
-                    reward = -1
+                is_stopped, profit = self.check_stop_loss(current_price)
+                if not is_stopped:
+                    profit = (self.entry_price - current_price) * self.position_size
+                    self.close_position()
+                    logging.info(f"Closed SELL at {current_price} with profit {profit}")
 
             # Replace the existing stop-loss logic with the new method
             if self.position:
@@ -443,3 +395,9 @@ class OandaForexTradingEnv(gym.Env):
         self.state = None
         self.state = None
         self.prev_price = 0
+
+    def close_position(self):
+        """Close the current position and reset related variables."""
+        self.position = None
+        self.entry_price = 0
+        self.position_size = 0
