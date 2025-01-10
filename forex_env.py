@@ -12,7 +12,7 @@ class OandaForexTradingEnv(gym.Env):
         Initialize the environment.
         
         Parameters:
-        - data_sequences: DataFrame containing the market data and technical indicators.
+        - data_sequences: pandas DataFrame containing the market data and technical indicators.
         - instrument: The trading instrument (e.g., "EUR_USD").
         - initial_capital: The initial capital in units of currency.
         - leverage: The leverage factor to apply to trades.
@@ -23,10 +23,10 @@ class OandaForexTradingEnv(gym.Env):
         - frequent_trade_penalty: The penalty for frequent trades.
         - risk_per_trade: The percentage of capital to risk per trade.
         """
-        super(OandaForexTradingEnv, self).__init__()
+        super().__init__()
         
         # Market data
-        self.data_sequences = data_sequences
+        self.data_sequences = data_sequences.values  # Convert DataFrame to numpy array once
         self.instrument = instrument
         self.initial_capital = initial_capital
         self.capital = initial_capital
@@ -84,24 +84,24 @@ class OandaForexTradingEnv(gym.Env):
 
         # Pre-allocate numpy arrays for better performance
         self.state_buffer = np.zeros((window_size, data_sequences.shape[1]), dtype=np.float32)
-        self.data_array = data_sequences.values  # Convert DataFrame to numpy array once
+        self.data_array = data_sequences  # Use the numpy array directly
 
         self.current_step = 0
         self.peak_capital = initial_capital  # Initialize peak capital
         self.trade_log = []  # Initialize trade log
+        # Ensure all attributes are initialized before calling reset
         self.reset()
 
     def seed(self, seed=None):
         self.np_random, seed = gym.utils.seeding.np_random(seed)
         return [seed]
-    
     def calculate_percentage_change_from_entry(self, entry_price, current_price):
         """Calculate percentage change with protection against division by zero."""
-        if not entry_price or entry_price == 0:
+        if entry_price is None or entry_price == 0:
             return 0.0
         return (current_price - entry_price) / entry_price
+        return (current_price - entry_price) / entry_price
 
-    @lru_cache(maxsize=1024)
     def apply_risk_management(self, current_price):
         """Simplified risk management rules."""
         if current_price <= 0:
@@ -151,7 +151,7 @@ class OandaForexTradingEnv(gym.Env):
         self.trade_size = 0
         previous_step = self.current_step if self.current_step != 0 else 0  # Track the previous step
         try:
-            current_price = self.data_sequences.iloc[self.current_step]['close']
+            current_price = self.data_sequences[self.current_step, self.data_sequences.columns.get_loc('close')]
             previous_portfolio_value = min(self.capital + self.position_size * current_price, 1e9)
             reward = 0
             done = False
@@ -219,7 +219,7 @@ class OandaForexTradingEnv(gym.Env):
             if self.capital < minimum_capital_threshold:
                 done = True
                 truncated = True
-                print("Truncated threshold reached!")
+                logging.error("Truncated threshold reached!")
                 self.render()
             self.prev_price = current_price
 
@@ -233,12 +233,6 @@ class OandaForexTradingEnv(gym.Env):
 
             # Add unrealized PnL to reward
             reward += unrealized_pnl * 0.0001  # Scale factor
-
-            # Check trade frequency
-            current_day = pd.Timestamp(self.data_sequences.index[self.current_step]).date()
-            if self.last_trade_day != current_day:
-                self.trades_today = 0
-                self.last_trade_day = current_day
 
             # Update trade metrics
             if info.get('profit', 0) > 0:
@@ -275,8 +269,11 @@ class OandaForexTradingEnv(gym.Env):
         )
 
         # Calculate percentage change with scaling
-        reward = ((portfolio_value - previous_portfolio_value) /
-                  max(previous_portfolio_value, self.initial_capital)) * self.scaling_factor
+        if previous_portfolio_value == 0:
+            reward = 0
+        else:
+            reward = ((portfolio_value - previous_portfolio_value) /
+                      max(previous_portfolio_value, self.initial_capital)) * self.scaling_factor
 
         # Normalize reward
         reward = self.normalize_reward(reward)
@@ -285,13 +282,13 @@ class OandaForexTradingEnv(gym.Env):
         if self.position_size > self.position_size_limit:
             reward -= 0.05  # Lower penalty for excessive position size
 
-        self.current_step += 1
-
         # Ensure current_step does not exceed the length of data_sequences
-        if self.current_step >= len(self.data_sequences):
+        if self.current_step + 1 >= len(self.data_sequences):
             done = True
             truncated = False
             self.current_step = len(self.data_sequences) - 1  # Ensure current_step is within bounds
+        else:
+            self.current_step += 1
 
         # Normalize state
         if not done:
@@ -300,11 +297,22 @@ class OandaForexTradingEnv(gym.Env):
             self.state = None
 
         if self.current_step % self.render_interval == 0 or done or truncated:
+            logging.info(f"Rendering at step {self.current_step}")
             self.render()
 
         return self.state, reward, done, truncated, info
 
-    def reset(self, *, seed=None, options=None):
+    def reset(self, *, seed=None):
+        """
+        Reset the environment to its initial state.
+
+        Parameters:
+        - seed: Random seed for reproducibility.
+
+        Returns:
+        - state: The initial state of the environment.
+        - info: Additional information (empty dictionary).
+        """
         if seed is not None:
             self.seed(seed)
         self.position_size = 0
@@ -323,7 +331,7 @@ class OandaForexTradingEnv(gym.Env):
 
         # Add a condition to prevent excessive logging
         if self.current_step % self.render_interval == 0:
-            print(f"Env Reset Called!")
+            logging.info("Env Reset Called!")
         
         return self.state, {}
 
@@ -335,7 +343,7 @@ class OandaForexTradingEnv(gym.Env):
             self.state_buffer[:] = self.data_array[self.current_step - self.window_size : self.current_step]
             return self.state_buffer
         except Exception as e:
-            print(f"Error in _next_observation: Invalid current_step value: {self.current_step}, Error: {e}")
+            logging.error(f"Error in _next_observation: Invalid current_step value: {self.current_step}, Error: {e}")
             raise e
 
     def render(self, mode='human', close=False):
@@ -348,7 +356,9 @@ class OandaForexTradingEnv(gym.Env):
             exit_price_str = f"{exit_price:.2f}" if isinstance(exit_price, (int, float)) else "N/A"
             profit_str = f"{profit:.2f}" if isinstance(profit, (int, float)) else "N/A"
         
-            print(f"Last Trade - Type: {last_trade['type']}, Entry: {last_trade['entry_price']:.2f}, Exit: {exit_price_str}, Profit: {profit_str}")
+            entry_price = last_trade.get('entry_price', None)
+            entry_price_str = f"{entry_price:.2f}" if isinstance(entry_price, (int, float)) else "N/A"
+            print(f"Last Trade - Type: {last_trade['type']}, Entry: {entry_price_str}, Exit: {exit_price_str}, Profit: {profit_str}")
     
         closing_trades = [trade for trade in self.trade_log if trade.get('type') in ['CLOSE_BUY', 'CLOSE_SELL']]
         number_of_closing_trades = len(closing_trades)
@@ -399,3 +409,6 @@ class OandaForexTradingEnv(gym.Env):
         self.position = None
         self.entry_price = 0
         self.position_size = 0
+        self.trade_size = 0
+        self.trades_today = 0
+        self.last_trade_day = None
