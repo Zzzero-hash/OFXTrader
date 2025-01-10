@@ -78,7 +78,7 @@ def train_model(train_data, use_optuna=True, n_trials=10, timesteps=50000, stop_
         "n_trials": n_trials
     }
     if use_optuna:
-        model = hyperparam_tuning(train_data, n_trials=n_trials)
+        model = hyperparam_tuning(train_data, n_trials=n_trials, stop_loss_percent=stop_loss_percent)
     
     if device == 'cuda':
         # Optimize CUDA settings
@@ -103,7 +103,7 @@ def train_model(train_data, use_optuna=True, n_trials=10, timesteps=50000, stop_
     
     return model
 
-def hyperparam_tuning(train_data: pd.DataFrame, n_trials: int = 10) -> PPO:
+def hyperparam_tuning(train_data: pd.DataFrame, n_trials: int = 10, stop_loss_percent: float = 0.02) -> PPO:
     """
     Perform hyperparameter tuning using Optuna.
 

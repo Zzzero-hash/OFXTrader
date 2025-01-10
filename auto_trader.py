@@ -50,8 +50,8 @@ if __name__ == "__main__":
                 start_date=start_date,
                 end_date=end_date,
                 access_token=access_token,
-                max_profit_percent=args.max_profit_percent,
-                max_loss_percent=args.max_loss_percent
+                max_profit_percent=float(args.max_profit_percent),  # Ensure correct type
+                max_loss_percent=float(args.max_loss_percent)  # Ensure correct type
             )
             bot.start_live_trading()
         else:
@@ -71,8 +71,8 @@ if __name__ == "__main__":
                     start_date=start_date,
                     end_date=end_date,
                     access_token=access_token,
-                    max_profit_percent=args.max_profit_percent,
-                    max_loss_percent=args.max_loss_percent
+                    max_profit_percent=float(args.max_profit_percent),  # Ensure correct type
+                    max_loss_percent=float(args.max_loss_percent)  # Ensure correct type
                 )
                 bot.start_live_trading()
             else:
