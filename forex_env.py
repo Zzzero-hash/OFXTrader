@@ -33,9 +33,8 @@ class OandaForexTradingEnv(gym.Env):
         self.leverage = leverage  # Initialize leverage
         self.window_size = window_size
         self.fee_rate = 0.0001
-        self.percent_to_trade = 0.05  # Reduced position size
+        self.percent_to_trade = 0.05  # Use 5 percent of balance for position size
         self.position_size = 0
-        self.trade_size = 0
         self.total_fees = 0
         self.total_profit = 0
         self.position = None
@@ -46,15 +45,11 @@ class OandaForexTradingEnv(gym.Env):
         self.risk_per_trade = risk_per_trade  # Initialize risk per trade
         self.scaling_factor = 1e-4  # Add scaling factor for numerical stability
         self.max_portfolio_value = 1e7  # Maximum allowed portfolio value
-        self.min_trade_size = 0.01  # Minimum trade size
-        self.max_trade_size = initial_capital * 5  # Maximum trade size
         self.max_position_size = min(self.initial_capital * self.leverage * 0.95, 1e6)  # Calculate maximum position size
         self.position_size_limit = min(self.initial_capital * 10, 1e6)  # Set position size limit
         self.max_trades_per_day = 5  # Limit number of trades
         self.min_profit_threshold = 0.001  # Minimum profit to consider trade
         self.max_loss_threshold = -0.02  # Maximum loss before closing
-        self.trades_today = 0
-        self.last_trade_day = None
         
         # Risk management limits
         self.max_drawdown_limit = 0.15  # 15% maximum drawdown
@@ -109,10 +104,9 @@ class OandaForexTradingEnv(gym.Env):
             return 0.0
         
         # Simplified position size calculation
-        risk_amount = self.capital * self.risk_per_trade
-        position_size = (risk_amount / (current_price * self.stop_loss_percent)) * self.leverage
+        position_size = self.capital * self.percent_to_trade
         
-        return np.clip(position_size, self.min_trade_size, self.position_size_limit)
+        return position_size
 
     def check_stop_loss(self, current_price):
         """Check if stop loss has been triggered and calculate profit/loss."""
@@ -148,7 +142,6 @@ class OandaForexTradingEnv(gym.Env):
         if action not in range(self.action_space.n):
             raise ValueError(f"Invalid action: {action}")
 
-        self.trade_size = 0
         previous_step = self.current_step if self.current_step != 0 else 0  # Track the previous step
         try:
             current_price = self.data_sequences[self.current_step, self.data_sequences.columns.get_loc('close')]
@@ -169,7 +162,6 @@ class OandaForexTradingEnv(gym.Env):
                     self.position = 'Long'
                     self.entry_price = current_price
                     self.position_size = position_size
-                    self.trade_size += 1
                     self.trade_log.append({'type': 'BUY', 'price': current_price, 'size': position_size})
                     logging.info(f"Executed BUY at {current_price} with size {position_size}")
 
@@ -179,7 +171,6 @@ class OandaForexTradingEnv(gym.Env):
                     self.position = 'Short'
                     self.entry_price = current_price
                     self.position_size = position_size
-                    self.trade_size += 1
                     self.trade_log.append({'type': 'SELL', 'price': current_price, 'size': position_size})
                     logging.info(f"Executed SELL at {current_price} with size {position_size}")
 
@@ -383,7 +374,6 @@ class OandaForexTradingEnv(gym.Env):
         self.fee_rate = 0
         self.percent_to_trade = 0
         self.position_size = 0
-        self.trade_size = 0
         self.total_fees = 0
         self.total_profit = 0
         self.position = None
@@ -409,6 +399,3 @@ class OandaForexTradingEnv(gym.Env):
         self.position = None
         self.entry_price = 0
         self.position_size = 0
-        self.trade_size = 0
-        self.trades_today = 0
-        self.last_trade_day = None
