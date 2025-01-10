@@ -391,8 +391,6 @@ class OandaForexTradingEnv(gym.Env):
         self.current_step = 0
         self.trade_log = None
         self.peak_capital = 0
-        self.peak_capital = 0
-        self.state = None
         self.state = None
         self.prev_price = 0
 
