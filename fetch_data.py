@@ -5,6 +5,7 @@ import oandapyV20
 import oandapyV20.endpoints.instruments as instruments
 from concurrent.futures import ThreadPoolExecutor
 import ta
+import logging
 
 @lru_cache(maxsize=32)
 def fetch_oanda_candles_chunk(instrument, from_time, to_time, granularity, access_token):
@@ -12,25 +13,36 @@ def fetch_oanda_candles_chunk(instrument, from_time, to_time, granularity, acces
     client = oandapyV20.API(access_token=access_token)
     params = {
         "from": pd.Timestamp(from_time).strftime('%Y-%m-%dT%H:%M:%SZ'),
-        "to": pd.Timestamp(to_time).strftime('%Y-%m-%dT%H:%M:%SZ'),      
+        "to": pd.Timestamp(to_time).strftime('%Y-%m-%dT%H:%M:%SZ'),
         "granularity": granularity
     }
     r = instruments.InstrumentsCandles(instrument=instrument, params=params)
     resp = client.request(r)
     
     # Parse into DataFrame
-    data = resp["candles"]
-    df = pd.DataFrame([{
-        'time': candle['time'],
-        'open': float(candle['mid']['o']),
-        'high': float(candle['mid']['h']),
-        'low': float(candle['mid']['l']),
-        'close': float(candle['mid']['c']),
-        'volume': int(candle['volume'])
-    } for candle in data])
-    df['time'] = pd.to_datetime(df['time'])
-    df.set_index('time', inplace=True)
+    data = resp.get("candles", [])
     
+    rows = []
+    for candle in data:
+        row = {}
+        for k, v in candle.items():
+            if isinstance(v, dict):
+                for sub_k, sub_v in v.items():
+                    if sub_k == "o":
+                        row["open"] = float(sub_v)
+                    elif sub_k == "h":
+                        row["high"] = float(sub_v)
+                    elif sub_k == "l":
+                        row["low"] = float(sub_v)
+                    elif sub_k == "c":
+                        row["close"] = float(sub_v)
+            else:
+                row[k] = v
+        rows.append(row)
+    df = pd.DataFrame(rows)
+    if "time" in df.columns:
+        df["time"] = pd.to_datetime(df["time"])
+        df.set_index("time", inplace=True)
     return df
 
 def fetch_oanda_candles_range(instrument, start_date, end_date, granularity, access_token):

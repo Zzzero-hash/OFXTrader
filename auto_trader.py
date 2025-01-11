@@ -3,9 +3,10 @@ import datetime
 import logging
 import os
 from config_utils import load_or_create_config
-from train import initial_setup  # Retain only training utilities if needed
+from train import initial_setup
+from fetch_data import fetch_oanda_candles_range, add_technical_indicators
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)  # Set logging level to DEBUG
 warnings.filterwarnings("ignore")
 DATE_FORMAT = '%Y-%m-%dT%H:%M:%SZ'
 
@@ -58,7 +59,10 @@ if __name__ == "__main__":
             # Handle training if no pre-trained model is selected
             from train import train_model
             print("No pre-trained model selected. Starting training process...")
-            model_name = train_model(instrument, granularity, start_date, end_date)
+            df = fetch_oanda_candles_range(instrument, start_date, end_date, granularity, access_token)
+            df = add_technical_indicators(df)
+            print("Fetched DataFrame shape =", df.shape)
+            model_name = train_model(df)
             print(f"Training completed. Model saved as {model_name}.")
 
             trading = input("Would you like to start live trading with the trained model? [y/n]: ")

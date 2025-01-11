@@ -81,7 +81,7 @@ class OandaForexTradingEnv(gym.Env):
         self.state_buffer = np.zeros((window_size, data_sequences.shape[1]), dtype=np.float32)
         self.data_array = data_sequences  # Use the numpy array directly
 
-        self.current_step = 0
+        self.current_step = self.window_size  # Start after the initial window
         self.peak_capital = initial_capital  # Initialize peak capital
         self.trade_log = []  # Initialize trade log
         # Ensure all attributes are initialized before calling reset
@@ -90,11 +90,11 @@ class OandaForexTradingEnv(gym.Env):
     def seed(self, seed=None):
         self.np_random, seed = gym.utils.seeding.np_random(seed)
         return [seed]
+    
     def calculate_percentage_change_from_entry(self, entry_price, current_price):
         """Calculate percentage change with protection against division by zero."""
         if entry_price is None or entry_price == 0:
             return 0.0
-        return (current_price - entry_price) / entry_price
         return (current_price - entry_price) / entry_price
 
     def apply_risk_management(self, current_price):
@@ -143,9 +143,10 @@ class OandaForexTradingEnv(gym.Env):
             raise ValueError(f"Invalid action: {action}")
 
         previous_step = self.current_step if self.current_step != 0 else 0  # Track the previous step
+        previous_portfolio_value = min(self.capital, 1e9)  # Define a default value
         try:
-            current_price = self.data_sequences[self.current_step, self.data_sequences.columns.get_loc('close')]
-            previous_portfolio_value = min(self.capital + self.position_size * current_price, 1e9)
+            current_price = self.data_sequences[self.current_step]['close']
+            previous_portfolio_value = min(self.capital, 1e9)  # Remove position size from here
             reward = 0
             done = False
             truncated = False
@@ -222,29 +223,45 @@ class OandaForexTradingEnv(gym.Env):
                 # Unrealized PnL for a short position
                 unrealized_pnl = (self.entry_price - current_price) * self.position_size / self.leverage
 
-            # Add unrealized PnL to reward
-            reward += unrealized_pnl * 0.0001  # Scale factor
+            # Modify reward calculation
+            portfolio_value = np.clip(self.capital, 0, self.max_portfolio_value)  # Remove position size
 
-            # Update trade metrics
-            if info.get('profit', 0) > 0:
-                self.trade_metrics['wins'] += 1
-            elif info.get('profit', 0) < 0:
-                self.trade_metrics['losses'] += 1
+            # Calculate percentage change with scaling
+            if previous_portfolio_value == 0:
+                reward = 0
+            else:
+                reward = ((portfolio_value - previous_portfolio_value) /
+                          max(previous_portfolio_value, self.initial_capital)) * self.scaling_factor
 
-            # Append trade info to trade_log
-            if info:
-                self.trade_log.append(info)
+            # Now add unrealized PnL bonus here
+            reward += unrealized_pnl * 0.001
 
-            # Calculate drawdown
-            self.trade_metrics['current_drawdown'] = (self.peak_capital - self.capital) / self.peak_capital
-            self.trade_metrics['max_drawdown'] = max(self.trade_metrics['max_drawdown'],
-                                                     self.trade_metrics['current_drawdown'])
+            # Normalize reward
+            reward = self.normalize_reward(reward)
 
-            # Force close position if max loss exceeded
-            if self.trade_metrics['current_drawdown'] > self.max_drawdown_limit:
-                self.position = None
-                self.position_size = 0
+            # Add penalty for excessive position size
+            if self.position_size > self.position_size_limit:
+                reward -= 0.05  # Lower penalty for excessive position size
+
+            # Ensure current_step does not exceed the length of data_sequences
+            if self.current_step + 1 >= len(self.data_sequences):
                 done = True
+                truncated = False
+                self.current_step = len(self.data_sequences) - 1  # Ensure current_step is within bounds
+            else:
+                self.current_step += 1
+
+            # Normalize state
+            if not done:
+                self.state = self.normalize_state(self._next_observation())
+            else:
+                self.state = None
+
+            if self.current_step % self.render_interval == 0 or done or truncated:
+                logging.info(f"Rendering at step {self.current_step}")
+                self.render()
+
+            return self.state, reward, done, truncated, info
 
         except IndexError as e:
             done = True
@@ -293,7 +310,7 @@ class OandaForexTradingEnv(gym.Env):
 
         return self.state, reward, done, truncated, info
 
-    def reset(self, *, seed=None):
+    def reset(self, *, seed=None, options=None):
         """
         Reset the environment to its initial state.
 
@@ -310,15 +327,15 @@ class OandaForexTradingEnv(gym.Env):
         self.entry_price = 0
         self.trade_log = []
         self.total_fees = 0
-        self.current_step = 0
         self.capital = self.initial_capital
         self.total_profit = 0
         self.current_step = self.window_size  # Start after the initial window
-        self.state = self.normalize_state(self._next_observation())
 
         # Ensure current_step does not exceed the length of data_sequences
         if self.current_step >= len(self.data_sequences):
             self.current_step = len(self.data_sequences) - 1  # Ensure current_step is within bounds
+
+        self.state = self.normalize_state(self._next_observation())
 
         # Add a condition to prevent excessive logging
         if self.current_step % self.render_interval == 0:
