@@ -104,7 +104,6 @@ def test_model(test_data, model: PPO, n_eval_episodes: int = 5) -> Tuple[float, 
 
     for episode in range(n_eval_episodes):
         obs = env_test.reset()
-        done = False
         while not done:
             action, _states = model.predict(obs, deterministic=True)
             obs, reward, done, info = env_test.step(action)
