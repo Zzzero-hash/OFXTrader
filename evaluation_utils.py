@@ -1,10 +1,11 @@
 import logging
 import numpy as np
 from typing import Dict, List, Tuple
-from forex_env import create_env
+from forex_env import create_env, create_di_env
 from stable_baselines3 import PPO
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.callbacks import BaseCallback
+from ding.envs import DingEnvWrapper
 
 def calculate_sharpe_ratio(rewards: List[float], risk_free_rate: float = 0.0) -> float:
     """
@@ -90,70 +91,38 @@ def check_numerical_stability(metrics: Dict[str, float]) -> bool:
             return False
     return True
 
-def test_model(test_data, model: PPO, n_eval_episodes: int = 5) -> Tuple[float, Dict[str, float]]:
-    env_test = create_env(
+def test_model(test_data, policy, n_eval_episodes: int = 5) -> Tuple[float, Dict[str, float]]:
+    env = create_di_env(
         df=test_data,
         window_size=10,
-        frame_bound=(10, len(test_data)),
-        unit_side='right'
+        frame_bound=(10, len(test_data))
     )
-
-    mean_reward, std_reward = evaluate_policy(model, env_test, n_eval_episodes=n_eval_episodes, return_episode_rewards=False)
+    env = DingEnvWrapper(env)
+    
     all_rewards = []
     all_portfolio_values = []
 
     for episode in range(n_eval_episodes):
-        obs = env_test.reset()
+        obs = env.reset()
+        done = False
         while not done:
-            action, _states = model.predict(obs, deterministic=True)
-            obs, reward, done, info = env_test.step(action)
+            action = policy.predict(obs)
+            obs, reward, done, info = env.step(action)
             all_rewards.append(reward)
-            all_portfolio_values.append(env_test.capital)
+            all_portfolio_values.append(env.env.current_capital)
 
-    # Compute additional metrics
-    sharpe = calculate_sharpe_ratio(all_rewards)
-    sortino = calculate_sortino_ratio(all_rewards)
-    max_dd = calculate_max_drawdown(all_portfolio_values)
-    profit_factor = calculate_profit_factor(
-        profit=env_test.trade_metrics['total_profit'],
-        loss=abs(env_test.trade_metrics['total_profit'] - env_test.capital)
-    )
-
-    # Calculate profit and loss percentages
-    initial_capital = env_test.initial_capital
-    profit_percent = (env_test.trade_metrics['total_profit'] / initial_capital) * 100
-    loss_percent = (abs(env_test.trade_metrics['total_profit'] - env_test.capital) / initial_capital) * 100
-
+    # Calculate metrics
     metrics = {
-        'Mean Reward': mean_reward,
-        'Std Reward': std_reward,
-        'Sharpe Ratio': sharpe,
-        'Sortino Ratio': sortino,
-        'Maximum Drawdown': max_dd,
-        'Profit Factor': profit_factor,
-        'profit_percent': profit_percent,
-        'loss_percent': loss_percent
+        'Mean Reward': np.mean(all_rewards),
+        'Sharpe Ratio': calculate_sharpe_ratio(all_rewards),
+        'Maximum Drawdown': calculate_max_drawdown(all_portfolio_values),
+        'Profit Factor': calculate_profit_factor(
+            profit=env.env.trade_metrics['total_profit'],
+            loss=abs(env.env.trade_metrics['total_profit'] - env.env.current_capital)
+        )
     }
 
-    # Check for numerical stability
-    if not check_numerical_stability(metrics):
-        logging.warning("Numerical instability detected, returning safe values")
-        metrics = {
-            'Mean Reward': 0.0,
-            'Std Reward': 0.0,
-            'Sharpe Ratio': 0.0,
-            'Sortino Ratio': 0.0,
-            'Maximum Drawdown': 1.0,
-            'Profit Factor': 1.0,
-            'profit_percent': 0.0,
-            'loss_percent': 0.0
-        }
-
-    # Print the results
-    for key, value in metrics.items():
-        print(f"{key}: {value:.4f}")
-
-    return mean_reward, metrics
+    return np.mean(all_rewards), metrics
 
 def check_performance(metrics: Dict[str, float], threshold: float = 0.5) -> bool:
     """
@@ -182,10 +151,14 @@ def check_performance(metrics: Dict[str, float], threshold: float = 0.5) -> bool
     return sum(conditions) >= 3  # At least 3 conditions must be met
 
 class CustomLoggingCallback(BaseCallback):
-    def __init__(self, verbose=0):
+    def __init__(self, verbose=0, use_di_engine=False):
         super(CustomLoggingCallback, self).__init__(verbose)
+        self.use_di_engine = use_di_engine
 
     def _on_step(self):
-        # Access training info and log custom metrics here if needed
-        # Example: metrics can come from self.model.rollout_buffer or env
+        if self.use_di_engine:
+            # Handle DI-Engine specific logging
+            env = self.training_env.envs[0]
+            if hasattr(env, 'profit_history'):
+                logging.debug(f"Current profit: {env.profit_history[-1] if env.profit_history else 0}")
         return True
