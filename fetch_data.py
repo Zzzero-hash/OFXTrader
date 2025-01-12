@@ -29,13 +29,13 @@ def fetch_oanda_candles_chunk(instrument, from_time, to_time, granularity, acces
             if isinstance(v, dict):
                 for sub_k, sub_v in v.items():
                     if sub_k == "o":
-                        row["open"] = float(sub_v)
+                        row["Open"] = float(sub_v)
                     elif sub_k == "h":
-                        row["high"] = float(sub_v)
+                        row["High"] = float(sub_v)
                     elif sub_k == "l":
-                        row["low"] = float(sub_v)
+                        row["Low"] = float(sub_v)
                     elif sub_k == "c":
-                        row["close"] = float(sub_v)
+                        row["Close"] = float(sub_v)
             else:
                 row[k] = v
         rows.append(row)
@@ -74,9 +74,12 @@ def fetch_oanda_candles_range(instrument, start_date, end_date, granularity, acc
     return pd.concat(results, ignore_index=True)
 
 def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    close_prices = df['close']
-    high_prices = df['high']
-    low_prices = df['low']
+    # Ensure column names are capitalized
+    df.columns = df.columns.str.capitalize()
+    
+    close_prices = df['Close']
+    high_prices = df['High']
+    low_prices = df['Low']
     
     # Vectorized calculations
     df['rsi_14'] = ta.momentum.RSIIndicator(close=close_prices, window=14).rsi()

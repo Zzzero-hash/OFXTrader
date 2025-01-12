@@ -1,6 +1,7 @@
 import logging
 import numpy as np
 from typing import Dict, List, Tuple
+from forex_env import create_env
 from stable_baselines3 import PPO
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.callbacks import BaseCallback
@@ -89,29 +90,26 @@ def check_numerical_stability(metrics: Dict[str, float]) -> bool:
             return False
     return True
 
-def test_model(test_data, env_class, model: PPO, n_eval_episodes: int = 5) -> Tuple[float, Dict[str, float]]:
-    """
-    Evaluate the model using SB3's evaluate_policy and then calculate additional metrics.
-    """
+def test_model(test_data, model: PPO, n_eval_episodes: int = 5) -> Tuple[float, Dict[str, float]]:
+    env_test = create_env(
+        df=test_data,
+        window_size=10,
+        frame_bound=(10, len(test_data)),
+        unit_side='right'
+    )
 
-    # Initialize environment
-    env_test = env_class(data_sequences=test_data)
+    mean_reward, std_reward = evaluate_policy(model, env_test, n_eval_episodes=n_eval_episodes, return_episode_rewards=False)
     all_rewards = []
     all_portfolio_values = []
 
     for episode in range(n_eval_episodes):
         obs = env_test.reset()
         done = False
-        episode_reward = 0.0
         while not done:
             action, _states = model.predict(obs, deterministic=True)
             obs, reward, done, info = env_test.step(action)
-            episode_reward += reward
             all_rewards.append(reward)
             all_portfolio_values.append(env_test.capital)
-    
-    mean_reward = np.mean(all_rewards)
-    std_reward = np.std(all_rewards)
 
     # Compute additional metrics
     sharpe = calculate_sharpe_ratio(all_rewards)
@@ -125,7 +123,7 @@ def test_model(test_data, env_class, model: PPO, n_eval_episodes: int = 5) -> Tu
     # Calculate profit and loss percentages
     initial_capital = env_test.initial_capital
     profit_percent = (env_test.trade_metrics['total_profit'] / initial_capital) * 100
-    loss_percent = (env_test.trade_metrics['total_profit'] / initial_capital) * 100
+    loss_percent = (abs(env_test.trade_metrics['total_profit'] - env_test.capital) / initial_capital) * 100
 
     metrics = {
         'Mean Reward': mean_reward,

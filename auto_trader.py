@@ -12,6 +12,7 @@ DATE_FORMAT = '%Y-%m-%dT%H:%M:%SZ'
 
 # Example usage
 if __name__ == "__main__":
+
     config = load_or_create_config()
     import argparse
     parser = argparse.ArgumentParser()
