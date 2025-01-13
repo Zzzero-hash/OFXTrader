@@ -9,16 +9,19 @@ from .key_handler import decrypt_data  # Updated import statement
 
 def fetch_chunk(params, client):
     try:
-        response = client.request(InstrumentsCandles(instrument=params['instrument'], params=params))
+        instrument = params.pop('instrument')  # Correctly pop the instrument from params
+        logging.info(f"Fetching data with params: {params}")
+        response = client.request(InstrumentsCandles(instrument=instrument, params=params))
+        logging.info(f"Response received: {response}")
         candles = response.get('candles', [])
-        if len(candles) < 5000 or len(candles) == 0:
+        if len(candles) == 0:
             logging.warning(f'EOD reached for {params["from"]}')
         df = pd.DataFrame([{
             'time': candle['time'],
-            'open': candle['mid']['o'],
-            'high': candle['mid']['h'],
-            'low': candle['mid']['c'],
-            'close': candle['mid']['c'],
+            'open': float(candle['mid']['o']),
+            'high': float(candle['mid']['h']),
+            'low': float(candle['mid']['l']),
+            'close': float(candle['mid']['c']),
             'volume': candle['volume']
         } for candle in candles])
         return df
@@ -32,15 +35,17 @@ class DataHandler:
         self.api_key = api_key
         self.account = account
         self.client = oandapyV20.API(access_token=api_key)
+        self.min_window_size = 14  # Adjusted for typical technical indicators (e.g., RSI)
         
     def get_data(self, instrument, start_date, end_date, granularity):
         params = {
             "granularity": granularity,
-            "count": 5000,
             "instrument": instrument
         }
         data = pd.DataFrame()
-        current_start_date = datetime.fromisoformat(start_date)
+        
+        # Adjust start_date to fetch extra data for technical analysis window
+        current_start_date = datetime.fromisoformat(start_date) - timedelta(days=self.min_window_size * 2)  # Double the window for safety
         end_date = datetime.fromisoformat(end_date)
         tasks = []
 
@@ -62,6 +67,14 @@ class DataHandler:
             logging.error('No data fetched')
             return data
 
+        # Remove duplicate rows that might come from overlapping date ranges
+        data = data.loc[~data.index.duplicated(keep='first')]
+        data = data.sort_index()
+
+        if len(data) < self.min_window_size:
+            logging.error(f'Insufficient data points ({len(data)}) for technical analysis. Need at least {self.min_window_size} points.')
+            return pd.DataFrame()
+
         data['time'] = pd.to_datetime(data['time'])
         data.set_index('time', inplace=True)
         data.sort_index(inplace=True)
@@ -69,8 +82,25 @@ class DataHandler:
         data.fillna(method='ffill', inplace=True)
         data.dropna(inplace=True)
 
-        data = add_all_ta_features(data, open='open', high='high', low='low', close='close', volume='volume')
+        try:
+            # Configure default window sizes for technical indicators
+            data = add_all_ta_features(
+                data, 
+                open='open', 
+                high='high', 
+                low='low', 
+                close='close', 
+                volume='volume',
+                fillna=True,
+                window=self.min_window_size,
+            )
+            
+            # Trim the extra data we fetched for the window
+            data = data[start_date:]
+            
+        except Exception as e:
+            logging.error(f'Error calculating technical analysis: {e}')
+            return pd.DataFrame()
 
         logging.info(f"Data fetched and processed for {instrument} from {start_date} to {end_date}")
-
         return data
