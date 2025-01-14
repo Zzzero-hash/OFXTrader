@@ -79,7 +79,7 @@ class DataHandler:
         data.set_index('time', inplace=True)
         data.sort_index(inplace=True)
 
-        data.fillna(method='ffill', inplace=True)
+        data.ffill(axis=0, inplace=True)  # Update to use ffill() method
         data.dropna(inplace=True)
 
         try:
@@ -92,7 +92,6 @@ class DataHandler:
                 close='close', 
                 volume='volume',
                 fillna=True,
-                window=self.min_window_size,
             )
             
             # Trim the extra data we fetched for the window

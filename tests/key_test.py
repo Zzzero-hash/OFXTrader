@@ -6,12 +6,14 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 import pandas as pd
 from unittest.mock import patch
-from src.key_handler import decrypt_data
+from src.key_handler import decrypt_data, load_key
 from src.data_handler import DataHandler
 
 class TestDataHandlerFunctionality(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        # Load the key to ensure encryption setup
+        load_key()
         
         # Setup encryption and save the key and encrypted data
         cls.api_key = 'test_api_key'
