@@ -12,7 +12,10 @@ def generate_key():
         print(f'Key already exists: {key_path}')
 
 def load_key():
-    with open('secret.key', 'rb') as key_file:
+    key_path = 'secret.key'
+    if not os.path.exists(key_path):
+        setup_encryption()
+    with open(key_path, 'rb') as key_file:
         return key_file.read()
 
 def encrypt_data(api_key, account_id):
