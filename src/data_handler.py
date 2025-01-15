@@ -1,4 +1,5 @@
 import oandapyV20
+import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 from multiprocessing import Pool
@@ -36,8 +37,15 @@ class DataHandler:
         self.account = account
         self.client = oandapyV20.API(access_token=api_key)
         self.min_window_size = 14  # Adjusted for typical technical indicators (e.g., RSI)
+        self.window_size = None
+
+    def create_windowed_dataset(self, data, window_size):
+        windows = []
+        for i in range(len(data) - window_size + 1):
+            windows.append(data.iloc[i:i + window_size].values)
+        return windows
         
-    def get_data(self, instrument, start_date, end_date, granularity):
+    def get_data(self, instrument, start_date, end_date, granularity, window_size):
         params = {
             "granularity": granularity,
             "instrument": instrument
@@ -65,7 +73,7 @@ class DataHandler:
 
         if data.empty:
             logging.error('No data fetched')
-            return data
+            return []
 
         # Remove duplicate rows that might come from overlapping date ranges
         data = data.loc[~data.index.duplicated(keep='first')]
@@ -73,13 +81,13 @@ class DataHandler:
 
         if len(data) < self.min_window_size:
             logging.error(f'Insufficient data points ({len(data)}) for technical analysis. Need at least {self.min_window_size} points.')
-            return pd.DataFrame()
+            return []
 
         data['time'] = pd.to_datetime(data['time'])
         data.set_index('time', inplace=True)
         data.sort_index(inplace=True)
 
-        data.fillna(method='ffill', inplace=True)
+        data.ffill(inplace=True)
         data.dropna(inplace=True)
 
         try:
@@ -92,15 +100,16 @@ class DataHandler:
                 close='close', 
                 volume='volume',
                 fillna=True,
-                window=self.min_window_size,
             )
             
             # Trim the extra data we fetched for the window
             data = data[start_date:]
+
+            data = self.create_windowed_dataset(data, self.min_window_size)
             
         except Exception as e:
             logging.error(f'Error calculating technical analysis: {e}')
-            return pd.DataFrame()
+            return []
 
         logging.info(f"Data fetched and processed for {instrument} from {start_date} to {end_date}")
         return data

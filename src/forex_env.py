@@ -8,8 +8,8 @@ class ForexEnv(gym.Env):
     def __init__(self, instrument, start_date, end_date, granularity, initial_balance=1000, leverage=50, window_size=10):
         super(ForexEnv, self).__init__()
         self.data_handler = DataHandler()
-        self.data = self.data_handler.get_data(instrument, start_date, end_date, granularity)
-        self.data = self.data
+        self.data = self.data_handler.get_data(instrument, start_date, end_date, granularity, window_size)
+        self.data = np.array(self.data)
         self.action_space = spaces.Discrete(2)
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(window_size ,len(self.data.columns)))
         self.current_step = 0
@@ -33,11 +33,11 @@ class ForexEnv(gym.Env):
     
     def _next_observation(self):
         end = self.current_step + self.window_size
-        obs = self.data.iloc[self.current_step:end].values
+        obs = self.data.iloc[self.current_step:end]
         return obs
     
     def _take_action(self, action):
-        current_price = self.data['close'].values[self.current_step]
+        current_price = self.data[self.current_step, self.data.columns.get_loc('close')]
         if action == 0:
             self.position = 0
         elif action == 1:
@@ -59,7 +59,7 @@ class ForexEnv(gym.Env):
         return obs, reward, self.done, {}
     
     def _get_reward(self):
-        current_price = self.data['close'].values[self.current_step]
+        current_price = self.data[self.current_step, self.data.columns.get_loc('close')]
         reward = 0
         if self.position == 1:
             reward = (current_price - self.last_trade_price) * self.leverage
