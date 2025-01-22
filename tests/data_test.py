@@ -28,7 +28,7 @@ def main():
         print("Fetching data...")
         instrument = 'EUR_USD'
         start_date = '2023-01-01'
-        end_date = '2023-01-14'
+        end_date = '2024-01-01'
         granularity = 'D'
         data = data_handler.get_data(instrument, start_date, end_date, granularity, window_size=14)
         
@@ -47,13 +47,13 @@ class TestDataHandler(unittest.TestCase):
         data_handler = DataHandler()
         instrument = 'EUR_USD'
         start_date = '2023-01-01'
-        end_date = '2023-01-10'
+        end_date = '2023-12-01'
         granularity = 'D'
-        data = data_handler.get_data(instrument, start_date, end_date, granularity, window_size=14)
-        self.assertIsNotNone(data)
-        self.assertIsInstance(data, list)
-        self.assertGreater(len(data), 0)
-        self.assertIsInstance(data[0], np.ndarray)
+        windows, features = data_handler.get_data(instrument, start_date, end_date, granularity, window_size=14)
+        self.assertIsInstance(windows, np.ndarray)
+        self.assertIsInstance(features, list)
+        self.assertGreater(windows.shape[0], 0) # Check number of windows
+        self.assertEqual(windows.shape[2], len(features)) # Features should match
 
 if __name__ == '__main__':
     main()

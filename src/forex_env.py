@@ -5,13 +5,13 @@ from gym import spaces
 from src.data_handler import DataHandler
 
 class ForexEnv(gym.Env):
-    def __init__(self, instrument, start_date, end_date, granularity, initial_balance=1000, leverage=50, window_size=10):
+    def __init__(self, instrument, start_date, end_date, granularity, initial_balance=1000, leverage=50, window_size=10, spread_pips=0.0001):
         super(ForexEnv, self).__init__()
         self.data_handler = DataHandler()
-        self.data = self.data_handler.get_data(instrument, start_date, end_date, granularity, window_size)
-        self.data = np.array(self.data)
-        self.action_space = spaces.Discrete(2)
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(window_size ,len(self.data.columns)))
+        self.data, self.feature_names = self.data_handler.get_data(instrument, start_date, end_date, granularity, window_size)
+        self.n_windows, self.window_size, self.n_features = self.data.shape
+        self.close_idx = self.feature_names.index('close')
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(window_size, self.n_features))
         self.current_step = 0
         self.action_space = spaces.Discrete(3)
         self.initial_balance = initial_balance
@@ -21,51 +21,75 @@ class ForexEnv(gym.Env):
         self.position = 0
         self.last_trade_price = 0
         self.profit = 0
+        self.spread = spread_pips
+        self.entry_price = None
         self.done = False
 
     def reset(self):
+        assert len(self.data) >= self.window_size, f"Need at least {self.window_size} windows, got {len(self.data)}"
         self.balance = self.initial_balance
         self.position = 0
         self.profit = 0
+        self.entry_price = 0
         self.done = False
         self.current_step = 0
         return self._next_observation()
     
     def _next_observation(self):
-        end = self.current_step + self.window_size
-        obs = self.data.iloc[self.current_step:end]
-        return obs
+        if self.current_step >= self.n_windows:
+            self.done = True
+            return np.zeros((self.window_size, self.n_features))
+        return self.data[self.current_step]
     
     def _take_action(self, action):
-        current_price = self.data[self.current_step, self.data.columns.get_loc('close')]
+        current_price = self.data[self.current_step, -1, self.close_idx]
         if action == 0:
+            if self.position != 0:
+                self._calculate_profit(current_price)
             self.position = 0
         elif action == 1:
-            self.position = 1
-            self.last_trade_price = current_price
+            if self.position != 1:
+                if self.position == -1:
+                    self._calculate_profit(current_price)
+                self.entry_price = current_price + self.spread
+                self.position = 1
         elif action == 2:
-            self.position = -1
-            self.last_trade_price = current_price
+            if self.position != -1:
+                if self.position == 1:
+                    self._calculate_profit(current_price)
+                self.entry_price = current_price - self.spread
+                self.position = -1
         else:
             raise ValueError(f"Invalid action: {action}")
+        
+    def _calculate_profit(self, exit_price):
+        if self.position == 1:
+            profit = (exit_price - self.entry_price) * self.leverage
+        elif self.position == -1:
+            profit = (self.entry_price - exit_price) * self.leverage
+        else:
+            return self.balance + profit
         
     def step(self, action):
         self._take_action(action)
         self.current_step += 1
-        if self.current_step > len(self.data) - self.window_size:
-            self.done = True
+        self.done = self.current_step >= self.n_windows or self.balance <= 0.4 * self.initial_balance
         obs = self._next_observation()
-        reward = self._get_reward()
+        reward = self.balance - self.initial_balance
         return obs, reward, self.done, {}
     
     def _get_reward(self):
-        current_price = self.data[self.current_step, self.data.columns.get_loc('close')]
+        current_window = self.data[self.current_step]
+        close_idx = self.data_handler.feature_names.index('close')
+        current_price = current_window[-1, close_idx]
         reward = 0
         if self.position == 1:
             reward = (current_price - self.last_trade_price) * self.leverage
         elif self.position == -1:
             reward = (self.last_trade_price - current_price) * self.leverage
         self.profit += reward
+        if self.balance <= 0.1 * self.initial_balance:
+            self.done = True
         return reward
     
     def render(self, mode='human'):

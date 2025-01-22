@@ -25,14 +25,14 @@ class TestForexEnv(unittest.TestCase):
 
     def test_step(self):
         self.env.reset()
-        obs, reward, done, info = self.env.step(1)
+        obs, reward, done, _ = self.env.step(1)
         self.assertEqual(obs.shape[0], self.env.window_size)
-        self.assertIn('close', self.env.data.columns)
+        self.assertIn('close', self.env.data_handler.feature_names)
 
     def test_step_until_done(self):
         self.env.reset()
         while not self.env.done:
-            obs, reward, done, info = self.env.step(1)
+            obs, reward, done, _ = self.env.step(1)
         self.assertTrue(self.env.done)
 
 
