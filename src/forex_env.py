@@ -1,8 +1,8 @@
 import gymnasium as gym
 import numpy as np
 import pandas as pd
-from gym import spaces
-from src.data_handler import DataHandler
+from gymnasium import spaces
+from data_handler import DataHandler
 
 class ForexEnv(gym.Env):
     def __init__(self, instrument, start_date, end_date, granularity, initial_balance=1000, leverage=50, window_size=10, spread_pips=0.0001):
@@ -24,16 +24,20 @@ class ForexEnv(gym.Env):
         self.spread = spread_pips
         self.entry_price = None
         self.done = False
+        self.truncated = False
 
-    def reset(self):
+    def reset(self, seed=None, options=None):
+        # Optional: If needed, call the parent class reset
+        # super().reset(seed=seed, options=options)
         assert len(self.data) >= self.window_size, f"Need at least {self.window_size} windows, got {len(self.data)}"
         self.balance = self.initial_balance
         self.position = 0
         self.profit = 0
         self.entry_price = 0
         self.done = False
+        self.truncated = False
         self.current_step = 0
-        return self._next_observation()
+        return self._next_observation(), {}
     
     def _next_observation(self):
         if self.current_step >= self.n_windows:
@@ -73,10 +77,11 @@ class ForexEnv(gym.Env):
     def step(self, action):
         self._take_action(action)
         self.current_step += 1
-        self.done = self.current_step >= self.n_windows or self.balance <= 0.4 * self.initial_balance
+        self.done = self.current_step >= self.n_windows
+        self.truncated = self.balance <= 0.4 * self.initial_balance
         obs = self._next_observation()
         reward = self.balance - self.initial_balance
-        return obs, reward, self.done, {}
+        return obs, reward, self.done, self.truncated, {}
     
     def _get_reward(self):
         current_window = self.data[self.current_step]

@@ -6,9 +6,8 @@ from multiprocessing import Pool
 from oandapyV20.endpoints.instruments import InstrumentsCandles
 import logging
 import time
-import pytz
 from ta import add_all_ta_features
-from .key_handler import decrypt_data  # Updated import statement
+from key_handler import decrypt_data  # Updated import statement
 
 def fetch_chunk(params, client):
     for _ in range(3):  # Retry fetching data up to 3 times
