@@ -40,8 +40,8 @@ def train_model(config):
     for _ in range(config.get("num_epochs", 100)):
         result = algo.train()
         print(f"Training iteration {_}:")
-        print(f"  Episode reward mean: {result.get('episode_reward_mean', 0.0)}")
-        print(f"  Episode len mean: {result.get('episode_len_mean', 0.0)}")
+        episode_reward_mean = result.get("sampler_results", result).get('episode_reward_mean', 0.0)
+        print(f"Mean reward: {episode_reward_mean}")
     ray.shutdown()
     return algo
 
