@@ -3,11 +3,8 @@ import os
 import logging
 import unittest
 import numpy as np
-
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-
-from src.key_handler import decrypt_data, setup_encryption
-from src.data_handler import DataHandler
+from key_handler import decrypt_data, setup_encryption
+from data_handler import DataHandler
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

@@ -36,14 +36,26 @@ def train_model(config):
                                               "fcnet_activation": "relu"})
         )
     )
-    algo = algo_config.build()
+    trainer = algo_config.build()
     for _ in range(config.get("num_epochs", 100)):
-        result = algo.train()
-        print(f"Training iteration {_}:")
-        episode_reward_mean = result.get("sampler_results", result).get('episode_reward_mean', 0.0)
-        print(f"Mean reward: {episode_reward_mean}")
+        result = trainer.train()
+        # Print all keys in result to identify available metrics
+        print("Result dictionary keys:", list(result.keys()))
+        
+        if 'episode_reward' in result:  # Check for relevant metric key(s)
+            episode_rewards = result['episode_reward']
+            avg_episode_reward = sum(episode_rewards) / len(episode_rewards)
+            print(f"Average Episode Reward: {avg_episode_reward}")
+        else:
+            print("No episode reward metrics available yet.")
+        
+        tune.report(
+            episode_reward_mean=avg_episode_reward if 'episode_reward' in result else None,
+            episodes_total=result.get('episodes_total', 0),
+            info=result
+        )
     ray.shutdown()
-    return algo
+    return trainer
 
 if __name__ == "__main__":
     config = {
@@ -51,16 +63,18 @@ if __name__ == "__main__":
             "instrument": "EUR_USD",
             "start_date": "2022-01-01",
             "end_date": "2023-01-01",
-            "granularity": "H1",
+            "granularity": "M1",
             "window_size": 24,
             "initial_balance": 10000,
-            "leverage": 50
+            "leverage": 50,
+            "count": 5000
         },
         "num_gpus": 1,
         "train_batch_size": 4000,
         "lr": 3e-4,
         "gamma": 0.95,
         "num_epochs": 100,
+        "use_lstm": True,
         "model_config": {
             "fcnet_hiddens": [512, 256],
             "fcnet_activation": "tanh"
