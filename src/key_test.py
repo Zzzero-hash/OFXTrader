@@ -2,8 +2,8 @@ import unittest
 import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from src.key_handler import decrypt_data, load_key
-from src.data_handler import DataHandler
+from key_handler import decrypt_data, load_key
+from data_handler import DataHandler
 import pandas as pd
 from unittest.mock import patch
 

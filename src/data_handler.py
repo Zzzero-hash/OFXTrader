@@ -7,7 +7,7 @@ from oandapyV20.endpoints.instruments import InstrumentsCandles
 import logging
 import time
 from ta import add_all_ta_features
-from src.key_handler import decrypt_data  # Updated import statement
+from key_handler import decrypt_data  # Updated import statement
 
 def fetch_chunk(params, client):
     for _ in range(3):  # Retry fetching data up to 3 times
@@ -41,10 +41,10 @@ def fetch_chunk(params, client):
 
 class DataHandler:
     def __init__(self):
-        api_key, account = decrypt_data()
-        self.api_key = api_key
-        self.account = account
-        self.client = oandapyV20.API(access_token=api_key)
+        # api_key, account = decrypt_data()
+        self.api_key = '7d72ad59524a9f896c85eb7cc9d21a37-aa2a02a5157b1891340ac08e9a1d1c29'
+        self.account = '101-001-23675199-001'
+        self.client = oandapyV20.API(access_token=self.api_key)
         self.min_window_size = 14  # Adjusted for typical technical indicators (e.g., RSI)
         self.window_size = None
 

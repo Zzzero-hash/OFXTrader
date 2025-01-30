@@ -15,7 +15,7 @@ class TestForexEnv(unittest.TestCase):
             granularity='D',
             initial_balance=1000,
             leverage=50,
-            window_size=5
+            window_size=14
         )
 
     def test_reset(self):

@@ -2,7 +2,7 @@ import gymnasium as gym
 import numpy as np
 import pandas as pd
 from gymnasium import spaces
-from src.data_handler import DataHandler
+from data_handler import DataHandler
 
 class ForexEnv(gym.Env):
     def __init__(self, instrument, start_date, end_date, granularity, initial_balance=1000, leverage=50, window_size=10, spread_pips=0.0001):

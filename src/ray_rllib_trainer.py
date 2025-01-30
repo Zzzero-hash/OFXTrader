@@ -2,7 +2,7 @@ import ray
 from ray import tune
 from ray.rllib.algorithms.ppo import PPOConfig
 from ray.tune.registry import register_env
-from forex_env import ForexEnv
+from src.forex_env import ForexEnv
 
 def env_creator(env_config):
     return ForexEnv(
