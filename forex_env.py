@@ -5,11 +5,12 @@ from gymnasium import spaces
 from data_handler import DataHandler
 
 class ForexEnv(gym.Env):
-    def __init__(self, instrument, start_date, end_date, granularity, initial_balance=1000, leverage=50, window_size=10, spread_pips=0.0001):
+    def __init__(self, instrument, start_date, end_date, granularity, initial_balance=1000, leverage=50, window_size=14, spread_pips=0.0001):
         super(ForexEnv, self).__init__()
         self.data_handler = DataHandler()
         self.data, self.feature_names = self.data_handler.get_data(instrument, start_date, end_date, granularity, window_size)
         self.n_windows, self.window_size, self.n_features = self.data.shape
+        print(f"ForexEnv initialized with data shape: {self.data.shape}")
         self.close_idx = self.feature_names.index('close')
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(window_size, self.n_features))
         self.current_step = 0
@@ -81,7 +82,8 @@ class ForexEnv(gym.Env):
         self.truncated = self.balance <= 0.4 * self.initial_balance
         obs = self._next_observation()
         reward = self.balance - self.initial_balance
-        return obs, reward, self.done, self.truncated, {}
+        info = {'truncated': self.truncated}
+        return obs, reward, self.done, self.truncated, info
     
     def _get_reward(self):
         current_window = self.data[self.current_step]

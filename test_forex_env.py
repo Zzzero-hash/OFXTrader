@@ -11,7 +11,7 @@ class TestForexEnv(unittest.TestCase):
         self.env = ForexEnv(
             instrument='EUR_USD',
             start_date='2020-01-01',
-            end_date='2020-01-10',
+            end_date='2021-01-01',
             granularity='D',
             initial_balance=1000,
             leverage=50,
@@ -19,20 +19,20 @@ class TestForexEnv(unittest.TestCase):
         )
 
     def test_reset(self):
-        obs = self.env.reset()
+        obs, _ = self.env.reset()
         self.assertEqual(obs.shape[0], self.env.window_size)
         self.assertFalse(self.env.done)
 
     def test_step(self):
         self.env.reset()
-        obs, reward, done, _ = self.env.step(1)
+        obs, reward, done, trunc, info = self.env.step(1)
         self.assertEqual(obs.shape[0], self.env.window_size)
         self.assertIn('close', self.env.data_handler.feature_names)
 
     def test_step_until_done(self):
         self.env.reset()
         while not self.env.done:
-            obs, reward, done, _ = self.env.step(1)
+            obs, reward, done, trunc, info = self.env.step(1)
         self.assertTrue(self.env.done)
 
 

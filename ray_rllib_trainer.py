@@ -48,12 +48,7 @@ def train_model(config):
             print(f"Average Episode Reward: {avg_episode_reward}")
         else:
             print("No episode reward metrics available yet.")
-        
-        tune.report(
-            episode_reward_mean=avg_episode_reward if 'episode_reward' in result else None,
-            episodes_total=result.get('episodes_total', 0),
-            info=result
-        )
+            print(f"Performance: {result['info']}")
     ray.shutdown()
     return trainer
 
@@ -64,7 +59,7 @@ if __name__ == "__main__":
             "start_date": "2022-01-01",
             "end_date": "2023-01-01",
             "granularity": "M1",
-            "window_size": 24,
+            "window_size": 14,
             "initial_balance": 10000,
             "leverage": 50,
             "count": 5000
