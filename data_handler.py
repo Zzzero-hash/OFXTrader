@@ -81,6 +81,7 @@ class DataHandler:
                 break
             current_start = last_time + pd.Timedelta(minutes=1)
             data = pd.concat([data, df], ignore_index=True)
+            current_start_date = current_start
         
         if data.empty:
             logging.error('No data fetched')

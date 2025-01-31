@@ -4,8 +4,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 import logging
 import unittest
 import numpy as np
-from src.key_handler import decrypt_data, setup_encryption
-from src.data_handler import DataHandler
+from key_handler import decrypt_data, setup_encryption
+from data_handler import DataHandler
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

@@ -6,7 +6,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 class TestForexEnv(unittest.TestCase):
     def setUp(self):
-        from src.forex_env import ForexEnv
+        from forex_env import ForexEnv
         # Initialize environment with sample parameters
         self.env = ForexEnv(
             instrument='EUR_USD',
