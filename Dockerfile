@@ -11,4 +11,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy the rest of the application code
 COPY . .
 
+# Environment variables
+ENV API_KEY="your_api_key"
+ENV API_SECRET="your_api_secret"
+
 CMD ["python", "ray_rllib_trainer.py"]
