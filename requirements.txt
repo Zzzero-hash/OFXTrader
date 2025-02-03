@@ -1,0 +1,8 @@
+ray[rllib]
+optuna
+gymnasium
+numpy
+pandas
+ta
+oandapyV20
+cryptography
