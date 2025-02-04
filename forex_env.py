@@ -110,8 +110,15 @@ class ForexEnv(gym.Env):
         reward_normalized = reward / self.initial_balance
 
         # Update termination conditions
-        self.done = self.current_step >= self.n_windows
-        self.truncated = self.truncated or (self.balance <= 0.4 * self.initial_balance)
+        if self.current_step >= self.n_windows:
+            self.render()
+            self.done = True
+        if self.truncated or (self.balance <= 0.4 * self.initial_balance):
+            self.render()
+            self.truncated = True
+
+        if self.current_step % int((1/4)*self.n_windows) == 0:
+            self.render()
 
         return (
             self._next_observation(),
