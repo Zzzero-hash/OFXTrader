@@ -1,6 +1,8 @@
+import os  # Added import for os
 import ray
 from ray import tune
 from ray.rllib.algorithms.ppo import PPOConfig
+from ray.tune.logger import TBXLoggerCallback
 from forex_env import ForexEnv
 import optuna
 
@@ -21,7 +23,7 @@ TUNING_SETTINGS = {
     "n_trials": 10,
     "tune_epochs": 20,  # Increased to allow episodes to complete
     "final_epochs": 100,
-    "resource": {"num_gpus": 1}
+    "resource": {"num_gpus": 1, "num_workers": 2}
 }
 
 # ======================
@@ -36,7 +38,7 @@ def train_model(config, tune_mode=True, render_during_train=True):
     env_instance = ForexEnv(**ENV_BASE_CONFIG)
     algo_config = (
         PPOConfig()
-        .api_stack(enable_env_runner_and_connector_v2=False, enable_rl_module_and_learner=False)
+        .api_stack(enable_env_runner_and_connector_v2=False, enable_rl_module_and_learner=False)  # Use legacy API stack
         .environment(env="forex-v0", env_config=ENV_BASE_CONFIG)
         .framework("torch")
         .resources(**TUNING_SETTINGS["resource"])
@@ -44,17 +46,10 @@ def train_model(config, tune_mode=True, render_during_train=True):
             train_batch_size=config["train_batch_size"],
             lr=config["lr"],
             gamma=config["gamma"],
-            reuse_actors=True
+            num_gpus=1
         )
+        .model(config["model_config"])  # Provide model configuration via legacy API
     )
-    algo_config._model_config = {
-        "observation_space": env_instance.observation_space,
-        "action_space": env_instance.action_space,
-        "inference_only": False,
-        "learner_only": False,
-        "model_config": config["model_config"]
-    }
-    
     trainer = algo_config.build_algo()
     
     # Track the best reward across all training iterations
@@ -110,25 +105,42 @@ def objective(trial):
 # ======================
 # Main Execution
 # ======================
-if __name__ == "__main__": 
-    ray.init(ignore_reinit_error=True)
+def train_forex_model():
+    config = PPOConfig().to_dict()
+    config["logger_config"] = {"logdir": "logs"}
+    # Add missing environment configuration to fix "config.env is not provided" error
+    config["env"] = "forex-v0"
+    config["env_config"] = ENV_BASE_CONFIG
+    
+    analysis = tune.run(
+        "PPO",
+        config=config,
+        storage_path=f"file://{os.path.abspath('logs')}",
+        stop={"training_iteration": 100},
+        checkpoint_at_end=True,
+        checkpoint_freq=10,
+        keep_checkpoints_num=1,
+        checkpoint_score_attr="episode_reward_mean",
+        verbose=1
+    )
 
-    study = optuna.create_study(direction="maximize")
-    study.optimize(objective, n_trials=TUNING_SETTINGS["n_trials"])
+    best_checkpoint = analysis.get_best_checkpoint(
+        trial=analysis.get_best_trial("episode_reward_mean", mode="max"),
+        metric="episode_reward_mean",
+        mode="max"
+    )
 
-    best_config = {
-        "train_batch_size": study.best_params["train_batch_size"],
-        "lr": study.best_params["lr"],
-        "gamma": study.best_params["gamma"],
-        "num_epochs": TUNING_SETTINGS["final_epochs"],
-        "model_config": {
-            "fcnet_hiddens": [
-                int(x) for x in study.best_params["fcnet_hiddens"].split(",")
-            ],
-            "fcnet_activation": study.best_params["activation"]
-        }
-    }
+    print(f"Best checkpoint saved at: {best_checkpoint}")
 
-    final_trainer = train_model(best_config, tune_mode=False)
+    # Save the best performing model
+    final_trainer = train_model(analysis.best_config, tune_mode=False)
+    final_trainer.restore(best_checkpoint)
     final_trainer.save("trained_forex_model")
+
+    # Log final training results
+    print("Training completed. Best model saved.")
+
+if __name__ == "__main__":
+    ray.init()
+    train_forex_model()
     ray.shutdown()

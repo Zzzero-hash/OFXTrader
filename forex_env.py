@@ -2,6 +2,7 @@ import gymnasium as gym
 import numpy as np
 import pandas as pd
 from gymnasium import spaces
+from gymnasium.utils.env_checker import check_env
 from data_handler import DataHandler
 from gymnasium.envs.registration import register
 
@@ -14,8 +15,10 @@ class ForexEnv(gym.Env):
                                                                   end_date, granularity, window_size)
         self.n_windows, self.window_size, self.n_features = self.data.shape
         self.close_idx = self.feature_names.index('close')
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, 
-                                           shape=(window_size, self.n_features))
+        self.observation_space = spaces.Box(low=-np.inf, 
+                                            high=np.inf, 
+                                           shape=(window_size, self.n_features),
+                                           dtype=np.float32)
         self.action_space = spaces.Discrete(3)
         self.initial_balance = initial_balance
         self.balance = initial_balance
@@ -31,6 +34,7 @@ class ForexEnv(gym.Env):
         self.truncated = False
 
     def reset(self, seed=None, options=None):
+        super().reset(seed=seed)  # ensure proper RNG seeding
         self.balance = self.initial_balance
         self.position = 0
         self.entry_price = None
@@ -39,13 +43,15 @@ class ForexEnv(gym.Env):
         self.current_step = 0
         self.done = False
         self.truncated = False
-        return self._next_observation(), {}
+        observation = self._next_observation()
+        print(f"Observation shape: {observation.shape}, dtype: {observation.dtype}")
+        return observation, {}
 
     def _next_observation(self):
         if self.current_step >= self.n_windows:
             self.done = True
-            return np.zeros((self.window_size, self.n_features))
-        return self.data[self.current_step]
+            return np.zeros((self.window_size, self.n_features), dtype=np.float32)
+        return self.data[self.current_step].astype(np.float32)
 
     def _calculate_profit(self, exit_price):
         if self.position == 0:
@@ -140,3 +146,4 @@ register(
     id='forex-v0',
     entry_point='forex_env:ForexEnv'
 )
+check_env(ForexEnv())
