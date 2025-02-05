@@ -15,7 +15,7 @@ class ForexEnv(gym.Env):
                                                                   end_date, granularity, window_size)
         self.n_windows, self.window_size, self.n_features = self.data.shape
         self.close_idx = self.feature_names.index('close')
-        self.observation_space = spaces.Box(low=-np.inf, 
+        self.observation_space = spaces.Box(low=0.0, 
                                             high=np.inf, 
                                            shape=(window_size, self.n_features),
                                            dtype=np.float32)
