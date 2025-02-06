@@ -1,5 +1,6 @@
 import os
 import ray
+import torch
 from ray import tune
 from ray.rllib.algorithms.ppo import PPOConfig
 from gymnasium.utils.env_checker import check_env
@@ -25,7 +26,7 @@ TUNING_SETTINGS = {
     "n_trials": 10,
     "tune_epochs": 20,  # Increased to allow episodes to complete
     "final_epochs": 100,
-    "resource": {"num_gpus": 0.2} # Specify GPU usage here
+    "resource": {"num_gpus": 1} # Specify GPU usage here
 }
 
 # ======================
@@ -37,6 +38,7 @@ tune.register_env("forex-v0", lambda config: ForexEnv(**config))
 # Training Function (Modified for new API stack)
 # ======================
 def train_model(config, tune_mode=True, render_during_train=True):
+    print(f"CUDA Available: {torch.cuda.is_available()}")
     # Create the environment directly
     env = ForexEnv(**ENV_BASE_CONFIG)
 
@@ -127,12 +129,11 @@ def train_forex_model():
     config["env_config"] = ENV_BASE_CONFIG
 
     analysis = tune.run(
-        train_model,  # Pass the training function directly
+        train_model,
         config=config,
         storage_path=f"file://{os.path.abspath('logs')}",
         stop={"training_iteration": 100},
         checkpoint_at_end=False,
-        checkpoint_freq=10,
         keep_checkpoints_num=1,
         checkpoint_score_attr="episode_reward_mean",
         verbose=1
