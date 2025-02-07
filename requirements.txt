@@ -7,4 +7,3 @@ pandas
 ta
 oandapyV20
 cryptography
-pillow

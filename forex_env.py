@@ -123,7 +123,7 @@ class ForexEnv(gym.Env):
             self.render()
             self.truncated = True
 
-        if self.current_step % int((1/4)*self.n_windows) == 0:
+        if self.current_step % int(1/10 * len(self.data)) == 0:
             self.render()
 
         return (

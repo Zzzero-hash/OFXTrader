@@ -8,6 +8,7 @@ from ray.tune.logger import TBXLoggerCallback
 from forex_env import ForexEnv
 import optuna
 import gymnasium as gym
+from ray.tune import PlacementGroupFactory
 
 # ======================
 # Shared Configuration
@@ -39,13 +40,11 @@ tune.register_env("forex-v0", lambda config: ForexEnv(**config))
 # ======================
 def train_model(config, tune_mode=True, render_during_train=True):
     print(f"CUDA Available: {torch.cuda.is_available()}")
-    # Create the environment directly
-    env = ForexEnv(**ENV_BASE_CONFIG)
 
     # Configure the PPO algorithm using the new API stack
     algo_config = (
         PPOConfig()
-        .environment(env=lambda config: ForexEnv(**config), env_config=ENV_BASE_CONFIG)
+        .environment(env="forex-v0", env_config=ENV_BASE_CONFIG)
         .framework("torch")
         .resources(**TUNING_SETTINGS["resource"])
         .training(
@@ -72,7 +71,7 @@ def train_model(config, tune_mode=True, render_during_train=True):
     # Track the best reward across all training iterations
     best_mean_reward = -float('inf')
 
-    for _ in range(config["num_epochs"]):
+    for epoch in range(config["num_epochs"]):
         result = trainer.train()
 
         # Safely extract reward with comprehensive fallbacks
@@ -127,6 +126,14 @@ def train_forex_model():
     config["logger_config"] = {"logdir": "logs"}
     config["env"] = "forex-v0"
     config["env_config"] = ENV_BASE_CONFIG
+    config["num_epochs"] = TUNING_SETTINGS["tune_epochs"]
+
+    # Define resources per trial
+    num_rollout_workers = 1  # Use the same number as in PPOConfig
+    resources_per_trial = PlacementGroupFactory(
+        [{'CPU': 1.0, 'GPU': 0.0 if TUNING_SETTINGS["resource"]["num_gpus"] == 0 else 0.5}] +  # Driver resources
+        [{'CPU': 1.0, 'GPU': 0.0 if TUNING_SETTINGS["resource"]["num_gpus"] == 0 else 0.5}] * num_rollout_workers   # Worker resources
+    )
 
     analysis = tune.run(
         train_model,
@@ -136,7 +143,8 @@ def train_forex_model():
         checkpoint_at_end=False,
         keep_checkpoints_num=1,
         checkpoint_score_attr="episode_reward_mean",
-        verbose=1
+        verbose=1,
+        resources_per_trial=resources_per_trial  # Add the resources_per_trial argument
     )
 
     best_checkpoint = analysis.get_best_checkpoint(
