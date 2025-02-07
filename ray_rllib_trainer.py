@@ -76,7 +76,7 @@ def train_model(config, tune_mode=True, render_during_train=True):
     if tune_mode and mean_reward > -float('inf'):
         tune.report(mean_reward=best_mean_reward)
 
-    return trainer
+    return {"mean_reward": best_mean_reward}
 
 # ======================
 # Optuna Optimization (Fixed)
