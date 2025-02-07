@@ -38,7 +38,7 @@ tune.register_env("forex-v0", lambda config: ForexEnv(**config))
 # ======================
 # Training Function (Using Native Preprocessing and Built-in LSTM)
 # ======================
-def train_model(config, tune_mode=True, render_during_train=True):
+def train_model(config, env_data_length, tune_mode=True, render_during_train=True):
     print(f"CUDA Available: {torch.cuda.is_available()}")
 
     # Configure the PPO algorithm using the new API stack.
@@ -56,6 +56,7 @@ def train_model(config, tune_mode=True, render_during_train=True):
     )
     algo_config.rollouts(num_rollout_workers=1)  
     algo_config.exploration(explore=True)  
+    algo_config.spec.max_episode_steps = env_data_length  # Set the max episode steps to the length of the data
     algo_config.model.update(config["model"])
 
     # Build the trainer
@@ -108,7 +109,8 @@ def objective(trial):
     hyperparams["model"]["lstm_cell_size"] = 128
 
     # Train and automatically report via tune.report()
-    trainer = train_model(hyperparams, tune_mode=True)
+    env = gym.make('forex-v0', **ENV_BASE_CONFIG)
+    trainer = train_model(hyperparams, len(env.data), tune_mode=True)
 
 # ======================
 # Main Execution
@@ -159,7 +161,8 @@ def train_forex_model():
     print(f"Best checkpoint saved at: {best_checkpoint}")
 
     # Save the best performing model.
-    final_trainer = train_model(analysis.best_config, tune_mode=False)
+    env = gym.make('forex-v0', **ENV_BASE_CONFIG)
+    final_trainer = train_model(analysis.best_config, len(env.data), tune_mode=False)
     final_trainer.restore(best_checkpoint)
     final_trainer.save("trained_forex_model")
 

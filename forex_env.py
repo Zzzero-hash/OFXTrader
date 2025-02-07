@@ -21,7 +21,7 @@ class ForexEnv(gym.Env):
     """
     def __init__(self, instrument="EUR_USD", start_date="2022-01-01", end_date="2023-01-01", 
                  granularity="M1", initial_balance=1000, leverage=50, window_size=14, 
-                 spread_pips=0.0001, render_frequency=1):
+                 spread_pips=0.0001, render_frequency=1000):
         super(ForexEnv, self).__init__()
         
         # Fetch and process data using DataHandler.
