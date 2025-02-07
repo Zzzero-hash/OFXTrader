@@ -18,8 +18,8 @@ ENV_BASE_CONFIG = {
     "start_date": "2022-01-01",
     "end_date": "2023-01-01",
     "granularity": "M1",
-    "window_size": 14,
-    "initial_balance": 10000,
+    "window_size": 14,  # Desired sequence length for the LSTM
+    "initial_balance": 1000,
     "leverage": 50
 }
 
@@ -27,7 +27,7 @@ TUNING_SETTINGS = {
     "n_trials": 10,
     "tune_epochs": 20,  # Increased to allow episodes to complete
     "final_epochs": 100,
-    "resource": {"num_gpus": 1} # Specify GPU usage here
+    "resource": {"num_gpus": 1}  # Specify GPU usage here
 }
 
 # ======================
@@ -36,52 +36,43 @@ TUNING_SETTINGS = {
 tune.register_env("forex-v0", lambda config: ForexEnv(**config))
 
 # ======================
-# Training Function (Modified for new API stack)
+# Training Function (Using Native Preprocessing and Built-in LSTM)
 # ======================
 def train_model(config, tune_mode=True, render_during_train=True):
     print(f"CUDA Available: {torch.cuda.is_available()}")
 
-    # Configure the PPO algorithm using the new API stack
-    algo_config = (
-        PPOConfig()
-        .environment(env="forex-v0", env_config=ENV_BASE_CONFIG)
-        .framework("torch")
-        .resources(**TUNING_SETTINGS["resource"])
-        .training(
-            train_batch_size=config["train_batch_size"],
-            lr=config["lr"],
-            gamma=config["gamma"],
-        )
-        .rollouts(num_rollout_workers=1)  # Add rollout workers
-        .exploration(explore=True)  # Enable exploration
-        .debugging(
-            logger_config={
-                "wandb": {
-                    "project": "forex_rllib",
-                    "api_key_file": "~/.wandb_api_key",
-                    "log_config": True,
-                }
-            }
-        )
+    # Configure the PPO algorithm using the new API stack.
+    # Here we allow RLlib's native preprocessor to operate (i.e. we do not disable it)
+    # and we enable the built-in recurrent (LSTM) wrapper by setting "use_lstm": True,
+    # "max_seq_len" to ENV_BASE_CONFIG["window_size"] (14), and "lstm_cell_size" to 128.
+    algo_config = PPOConfig()
+    algo_config.environment(env="forex-v0", env_config=ENV_BASE_CONFIG)
+    algo_config.framework("torch") 
+    algo_config.resources(**TUNING_SETTINGS["resource"]) 
+    algo_config.training(
+        train_batch_size=config["train_batch_size"],
+        lr=config["lr"],
+        gamma=config["gamma"],
     )
+    algo_config.rollouts(num_rollout_workers=1)  
+    algo_config.exploration(explore=True)  
+    algo_config.model.update(config["model"])
 
     # Build the trainer
     trainer = algo_config.build()
 
-    # Track the best reward across all training iterations
+    # Track the best reward across training iterations.
     best_mean_reward = -float('inf')
 
     for epoch in range(config["num_epochs"]):
         result = trainer.train()
 
-        # Safely extract reward with comprehensive fallbacks
+        # Safely extract the reward with comprehensive fallbacks.
         mean_reward = result.get("episode_reward_mean", result.get("episode_reward", -float('inf'))) or -float('inf')
-
-        # Update best reward
         if mean_reward > best_mean_reward:
             best_mean_reward = mean_reward
 
-    # Report the best reward seen during tuning
+    # Report the best reward seen during tuning.
     if tune_mode:
         tune.report(mean_reward=best_mean_reward)
 
@@ -101,19 +92,20 @@ def objective(trial):
             "train_batch_size", [2048, 4096, 8192]
         ),
         "num_epochs": TUNING_SETTINGS["tune_epochs"],
-        "model": {  # Model config using new API
+        "model": {  # Model config for the FC layers
             "fcnet_hiddens": None,  # To be set below
-            "fcnet_activation": trial.suggest_categorical(
-                "activation", ["relu", "tanh"]
-            )
+            "fcnet_activation": trial.suggest_categorical("activation", ["relu", "tanh"])
         }
     }
 
-    # Use the chosen fcnet_hiddens value without removing it so that it is saved in best_params
+    # Convert the chosen fcnet_hiddens string to a list of ints.
     fcnet_str = hyperparams["fcnet_hiddens"]
-    hyperparams["model"]["fcnet_hiddens"] = [
-        int(x) for x in fcnet_str.split(",")
-    ]
+    hyperparams["model"]["fcnet_hiddens"] = [int(x) for x in fcnet_str.split(",")]
+    
+    # Also set recurrent model parameters (native preprocessor is used).
+    hyperparams["model"]["use_lstm"] = True
+    hyperparams["model"]["max_seq_len"] = ENV_BASE_CONFIG["window_size"]
+    hyperparams["model"]["lstm_cell_size"] = 128
 
     # Train and automatically report via tune.report()
     trainer = train_model(hyperparams, tune_mode=True)
@@ -122,21 +114,32 @@ def objective(trial):
 # Main Execution
 # ======================
 def train_forex_model():
-    config = PPOConfig().to_dict()
-    config["logger_config"] = {"logdir": "logs"}
-    config["env"] = "forex-v0"
-    config["env_config"] = ENV_BASE_CONFIG
-    config["num_epochs"] = TUNING_SETTINGS["tune_epochs"]
+    config = {
+        "logger_config": {"logdir": "logs"},
+        "env": "forex-v0",
+        "env_config": ENV_BASE_CONFIG,
+        "num_epochs": TUNING_SETTINGS["tune_epochs"],
+        "model": {
+            "use_lstm": True,
+            "max_seq_len": ENV_BASE_CONFIG["window_size"],
+            "lstm_cell_size": 128,
+            "fcnet_hiddens": [256, 256],
+            "fcnet_activation": "relu",
+        },
+        "lr": 0.00005,
+        "gamma": 0.99,
+        "train_batch_size": 4000
+    }
 
-    # Define resources per trial
-    num_rollout_workers = 1  # Use the same number as in PPOConfig
+    # Define resources per trial.
+    num_rollout_workers = 1  # Consistent with PPOConfig.
     resources_per_trial = PlacementGroupFactory(
-        [{'CPU': 1.0, 'GPU': 0.0 if TUNING_SETTINGS["resource"]["num_gpus"] == 0 else 0.5}] +  # Driver resources
-        [{'CPU': 1.0, 'GPU': 0.0 if TUNING_SETTINGS["resource"]["num_gpus"] == 0 else 0.5}] * num_rollout_workers   # Worker resources
+        [{'CPU': 1.0, 'GPU': 0.0 if TUNING_SETTINGS["resource"]["num_gpus"] == 0 else 0.5}] +
+        [{'CPU': 1.0, 'GPU': 0.0 if TUNING_SETTINGS["resource"]["num_gpus"] == 0 else 0.5}] * num_rollout_workers
     )
 
     analysis = tune.run(
-        train_model,
+        tune.with_parameters(train_model, tune_mode=False),
         config=config,
         storage_path=f"file://{os.path.abspath('logs')}",
         stop={"training_iteration": 100},
@@ -144,7 +147,7 @@ def train_forex_model():
         keep_checkpoints_num=1,
         checkpoint_score_attr="episode_reward_mean",
         verbose=1,
-        resources_per_trial=resources_per_trial  # Add the resources_per_trial argument
+        resources_per_trial=resources_per_trial
     )
 
     best_checkpoint = analysis.get_best_checkpoint(
@@ -155,15 +158,15 @@ def train_forex_model():
 
     print(f"Best checkpoint saved at: {best_checkpoint}")
 
-    # Save the best performing model
+    # Save the best performing model.
     final_trainer = train_model(analysis.best_config, tune_mode=False)
     final_trainer.restore(best_checkpoint)
     final_trainer.save("trained_forex_model")
 
-    # Log final training results
     print("Training completed. Best model saved.")
 
 if __name__ == "__main__":
+    # Create the environment and ensure it conforms to the Gymnasium API.
     env = gym.make('forex-v0', **ENV_BASE_CONFIG)
     check_env(env.unwrapped)
 

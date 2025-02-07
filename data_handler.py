@@ -45,16 +45,17 @@ class DataHandler:
         self.api_key = '7d72ad59524a9f896c85eb7cc9d21a37-aa2a02a5157b1891340ac08e9a1d1c29'
         self.account = '101-001-23675199-001'
         self.client = oandapyV20.API(access_token=self.api_key)
+    
         self.min_window_size = 14  # Adjusted for typical technical indicators (e.g., RSI)
-        self.window_size = None
+        # self.window_size = None
 
-    def create_sliding_window_dataset(self, data, window_size):
-        data_np = data.to_numpy()
-        if len(data_np) < window_size:
-            logging.error(f"Not enough data ({len(data_np)}) for window size {window_size}")
-            return np.array([])
-        windows = np.lib.stride_tricks.sliding_window_view(data_np, window_shape=(window_size,), axis=0)
-        return windows.squeeze().transpose(0, 2, 1)
+    # def create_sliding_window_dataset(self, data, window_size):
+    #     data_np = data.to_numpy()
+    #     if len(data_np) < window_size:
+    #         logging.error(f"Not enough data ({len(data_np)}) for window size {window_size}")
+    #         return np.array([])
+    #     windows = np.lib.stride_tricks.sliding_window_view(data_np, window_shape=(window_size,), axis=0)
+    #     return windows.squeeze().transpose(0, 2, 1)
         
     def get_data(self, instrument, start_date, end_date, granularity, window_size):
         self.window_size = window_size
@@ -114,9 +115,10 @@ class DataHandler:
                 return np.array([]), []
 
             self.feature_names = data.columns.tolist()
-            windows = self.create_sliding_window_dataset(data, self.window_size)
+            # windows = self.create_sliding_window_dataset(data, self.window_size)
+            data_array = data.values
             logging.info(f"Data fetched and processed for {instrument} from {start_date} to {end_date}")
-            return windows, self.feature_names
+            return data_array, self.feature_names
         except Exception as e:
             logging.error(f'Error calculating technical analysis: {e}')
             return np.array([]), []
