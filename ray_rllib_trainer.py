@@ -106,7 +106,7 @@ def objective(trial):
     # Also set recurrent model parameters (native preprocessor is used).
     hyperparams["model"]["use_lstm"] = True
     hyperparams["model"]["max_seq_len"] = ENV_BASE_CONFIG["window_size"]
-    hyperparams["model"]["lstm_cell_size"] = 128
+    hyperparams["model"]["lstm_cell_size"] = 512
 
     # Train and automatically report via tune.report()
     env = gym.make('forex-v0', **ENV_BASE_CONFIG)
