@@ -148,6 +148,8 @@ def train_forex_model():
         checkpoint_at_end=False,
         keep_checkpoints_num=1,
         checkpoint_score_attr="episode_reward_mean",
+        metric="episode_reward_mean",
+        mode="max",
         verbose=1,
         resources_per_trial=resources_per_trial
     )
