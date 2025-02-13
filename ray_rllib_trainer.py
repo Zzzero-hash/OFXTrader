@@ -80,7 +80,7 @@ def train_model(config, tune_mode=True, render_during_train=True):
     return session.report({"episode_mean_reward": best_mean_reward})
 
 # ======================
-# Optuna Optimization (Fixed)
+# Optuna Optimization
 # ======================
 def objective(trial):
     hyperparams = {
