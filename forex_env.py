@@ -183,7 +183,6 @@ class ForexEnv(gym.Env):
         """
         print(f'Step: {self.current_step}')
         print(f'Balance: {self.balance:.2f}')
-        print(f'Position: {self.position}')
         print(f'Total Profit + (Unrealized P/L): {self.total_profit:.2f}')
         print('---------------------------------')
 

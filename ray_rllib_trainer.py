@@ -66,13 +66,17 @@ def train_model(config, tune_mode=True, render_during_train=True):
 
     for epoch in range(config["num_epochs"]):
         result = trainer.train()
-        mean_reward = result.get("episode_reward_mean", result.get("episode_reward", -float('inf'))) or -float('inf')
-        if tune_mode and mean_reward > -float('inf'):
-            tune.report(mean_reward=mean_reward)
+        # Log the computed reward and portfolio value for debugging.
+        computed_reward = result.get("episode_reward_mean", None)
+        portfolio_value = result.get("info", {}).get("portfolio_value", None)
+        print(f"Epoch: {epoch}, Reward: {computed_reward}, Portfolio Value: {portfolio_value}")
 
-    # Report the best reward seen during tuning.
-    if tune_mode and mean_reward > -float('inf'):
-        tune.report(mean_reward=best_mean_reward)
+        reward_to_report = computed_reward if computed_reward is not None and computed_reward != -float('inf') else 0
+
+        if reward_to_report > best_mean_reward:
+            best_mean_reward = reward_to_report
+        
+        tune.report(mean_reward=reward_to_report)
 
     return {"mean_reward": best_mean_reward}
 
