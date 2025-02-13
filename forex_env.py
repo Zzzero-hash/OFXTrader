@@ -67,7 +67,7 @@ class ForexEnv(gym.Env):
         
         # Tracking.
         self.current_step = 0
-        self.last_profit = 0
+        self.total_profit = 0
         self.done = False
         self.truncated = False
 
@@ -80,6 +80,7 @@ class ForexEnv(gym.Env):
         self.entry_step = 0
         self.last_profit = 0
         self.current_step = 0
+        self.total_profit = 0
         self.done = False
         self.truncated = False
 
@@ -111,6 +112,7 @@ class ForexEnv(gym.Env):
             profit = (self.entry_price - exit_price) * self.leverage
         
         self.balance += profit
+        self.total_profit += profit
         self.position = 0
         self.entry_price = None
         return profit
@@ -182,7 +184,7 @@ class ForexEnv(gym.Env):
         print(f'Step: {self.current_step}')
         print(f'Balance: {self.balance:.2f}')
         print(f'Position: {self.position}')
-        print(f'Last Profit: {self.last_profit:.2f}')
+        print(f'Total Profit + (Unrealized P/L): {self.total_profit:.2f}')
         print('---------------------------------')
 
     def close(self):

@@ -66,11 +66,9 @@ def train_model(config, tune_mode=True, render_during_train=True):
 
     for epoch in range(config["num_epochs"]):
         result = trainer.train()
-
-        # Safely extract the reward with comprehensive fallbacks.
         mean_reward = result.get("episode_reward_mean", result.get("episode_reward", -float('inf'))) or -float('inf')
-        if mean_reward > best_mean_reward:
-            best_mean_reward = mean_reward
+        if tune_mode and mean_reward > -float('inf'):
+            tune.report(mean_reward=mean_reward)
 
     # Report the best reward seen during tuning.
     if tune_mode and mean_reward > -float('inf'):
