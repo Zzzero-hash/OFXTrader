@@ -77,7 +77,7 @@ def train_model(config, tune_mode=True, render_during_train=True):
         if reward_to_report > best_mean_reward:
             best_mean_reward = reward_to_report
 
-    return session.report({"episode_mean_reward": best_mean_reward})
+    return session.report({"episode_reward_mean": best_mean_reward})
 
 # ======================
 # Optuna Optimization
