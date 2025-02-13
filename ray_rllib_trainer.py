@@ -9,6 +9,7 @@ from forex_env import ForexEnv
 import optuna
 import gymnasium as gym
 from ray.tune import PlacementGroupFactory
+from ray.air import session
 
 # ======================
 # Shared Configuration
@@ -75,10 +76,8 @@ def train_model(config, tune_mode=True, render_during_train=True):
 
         if reward_to_report > best_mean_reward:
             best_mean_reward = reward_to_report
-        
-        tune.report(mean_reward=reward_to_report)
 
-    return {"mean_reward": best_mean_reward}
+    return session.report({"episode_mean_reward": best_mean_reward})
 
 # ======================
 # Optuna Optimization (Fixed)
