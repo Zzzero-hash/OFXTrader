@@ -1,15 +1,19 @@
 import os
 import ray
 import torch
+import logging
 from ray import tune
 from ray.rllib.algorithms.ppo import PPOConfig
 from gymnasium.utils.env_checker import check_env
-from ray.tune.logger import TBXLoggerCallback
 from forex_env import ForexEnv
 import optuna
 import gymnasium as gym
 from ray.tune import PlacementGroupFactory
 from ray.air import session
+
+# Configure logging for detailed tracking
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # ======================
 # Shared Configuration
@@ -19,16 +23,16 @@ ENV_BASE_CONFIG = {
     "start_date": "2022-01-01",
     "end_date": "2023-01-01",
     "granularity": "M1",
-    "window_size": 14,  # Desired sequence length for the LSTM
+    "window_size": 14,  # Sequence length for LSTM
     "initial_balance": 1000,
     "leverage": 50
 }
 
 TUNING_SETTINGS = {
     "n_trials": 10,
-    "tune_epochs": 20,  # Increased to allow episodes to complete
-    "final_epochs": 100,
-    "resource": {"num_gpus": 1}  # Specify GPU usage here
+    "tune_epochs": 20,  # Epochs for hyperparameter tuning
+    "final_epochs": 100,  # Epochs for final training
+    "resource": {"num_gpus": 1 if torch.cuda.is_available() else 0}  # Dynamic GPU usage
 }
 
 # ======================
@@ -37,144 +41,189 @@ TUNING_SETTINGS = {
 tune.register_env("forex-v0", lambda config: ForexEnv(**config))
 
 # ======================
-# Training Function (Using Native Preprocessing and Built-in LSTM)
+# Training Function
 # ======================
-def train_model(config, tune_mode=True, render_during_train=True):
-    print(f"CUDA Available: {torch.cuda.is_available()}")
+def train_model(config, tune_mode=True):
+    """Train the PPO model and report results."""
+    try:
+        logger.info(f"Training started - Tune mode: {tune_mode}, CUDA: {torch.cuda.is_available()}")
 
-    # Configure the PPO algorithm using the new API stack.
-    # Here we allow RLlib's native preprocessor to operate (i.e. we do not disable it)
-    # and we enable the built-in recurrent (LSTM) wrapper by setting "use_lstm": True,
-    # "max_seq_len" to ENV_BASE_CONFIG["window_size"] (14), and "lstm_cell_size" to 128.
-    algo_config = PPOConfig()
-    algo_config.environment(env="forex-v0", env_config=ENV_BASE_CONFIG)
-    algo_config.framework("torch") 
-    algo_config.resources(**TUNING_SETTINGS["resource"]) 
-    algo_config.training(
-        train_batch_size=config["train_batch_size"],
-        lr=config["lr"],
-        gamma=config["gamma"],
-    )
-    algo_config.rollouts(num_rollout_workers=1)  
-    algo_config.exploration(explore=True)  
-    algo_config.model.update(config["model"])
+        # Configure PPO with RLlib's best practices (ref: RLlib docs)
+        algo_config = PPOConfig()
+        algo_config.environment(env="forex-v0", env_config=ENV_BASE_CONFIG)
+        algo_config.framework("torch")
+        algo_config.resources(**TUNING_SETTINGS["resource"])
+        algo_config.training(
+            train_batch_size=config["train_batch_size"],
+            lr=config["lr"],
+            gamma=config["gamma"],
+            model=config["model"]
+        )
+        algo_config.rollouts(
+            num_rollout_workers=1,
+            rollout_fragment_length=200  # Recommended default from RLlib docs
+        )
+        algo_config.exploration(explore=True)
 
-    # Build the trainer
-    trainer = algo_config.build()
+        trainer = algo_config.build()
+        best_mean_reward = -float('inf')
 
-    # Track the best reward across training iterations.
-    best_mean_reward = -float('inf')
+        for epoch in range(config["num_epochs"]):
+            result = trainer.train()
+            mean_reward = result.get("episode_reward_mean", -float('inf'))
+            logger.info(f"Epoch {epoch + 1}/{config['num_epochs']}: Mean Reward = {mean_reward}, "
+                       f"Episodes This Iter = {result.get('episodes_this_iter', 0)}")
 
-    for epoch in range(config["num_epochs"]):
-        result = trainer.train()
-        # Log the computed reward and portfolio value for debugging.
-        computed_reward = result.get("episode_reward_mean", None)
-        portfolio_value = result.get("info", {}).get("portfolio_value", None)
-        print(f"Epoch: {epoch}, Reward: {computed_reward}, Portfolio Value: {portfolio_value}")
+            if mean_reward > best_mean_reward and mean_reward != -float('inf'):
+                best_mean_reward = mean_reward
 
-        reward_to_report = computed_reward if computed_reward is not None and computed_reward != -float('inf') else 0
+        if tune_mode:
+            session.report({"episode_reward_mean": best_mean_reward})
+            logger.info(f"Tune mode - Reported episode_reward_mean: {best_mean_reward}")
+        else:
+            logger.info(f"Final mode - Best mean reward: {best_mean_reward}")
+            return trainer
 
-        if reward_to_report > best_mean_reward:
-            best_mean_reward = reward_to_report
+        trainer.stop()  # Clean up resources
+        return best_mean_reward
 
-    return session.report({"episode_reward_mean": best_mean_reward})
+    except Exception as e:
+        logger.error(f"Training failed: {str(e)}")
+        raise
 
 # ======================
 # Optuna Optimization
 # ======================
 def objective(trial):
-    hyperparams = {
-        "lr": trial.suggest_float("lr", 1e-5, 1e-3, log=True),
-        "gamma": trial.suggest_float("gamma", 0.9, 0.999),
-        "fcnet_hiddens": trial.suggest_categorical(
-            "fcnet_hiddens", ["256,256", "512,256", "512,512"]
-        ),
-        "train_batch_size": trial.suggest_categorical(
-            "train_batch_size", [2048, 4096, 8192]
-        ),
-        "num_epochs": TUNING_SETTINGS["tune_epochs"],
-        "model": {  # Model config for the FC layers
-            "fcnet_hiddens": None,  # To be set below
-            "fcnet_activation": trial.suggest_categorical("activation", ["relu", "tanh"])
+    """Optuna objective function for hyperparameter optimization."""
+    try:
+        hyperparams = {
+            "lr": trial.suggest_float("lr", 1e-5, 1e-3, log=True),
+            "gamma": trial.suggest_float("gamma", 0.9, 0.999),
+            "fcnet_hiddens": trial.suggest_categorical("fcnet_hiddens", ["256,256", "512,256", "512,512"]),
+            "train_batch_size": trial.suggest_categorical("train_batch_size", [2048, 4096, 8192]),
+            "num_epochs": TUNING_SETTINGS["tune_epochs"],
+            "model": {
+                "fcnet_hiddens": None,  # Set below
+                "fcnet_activation": trial.suggest_categorical("activation", ["relu", "tanh"]),
+                "use_lstm": True,
+                "max_seq_len": ENV_BASE_CONFIG["window_size"],
+                "lstm_cell_size": trial.suggest_categorical("lstm_cell_size", [256, 512])  # Expanded range
+            }
         }
-    }
 
-    # Convert the chosen fcnet_hiddens string to a list of ints.
-    fcnet_str = hyperparams["fcnet_hiddens"]
-    hyperparams["model"]["fcnet_hiddens"] = [int(x) for x in fcnet_str.split(",")]
-    
-    # Also set recurrent model parameters (native preprocessor is used).
-    hyperparams["model"]["use_lstm"] = True
-    hyperparams["model"]["max_seq_len"] = ENV_BASE_CONFIG["window_size"]
-    hyperparams["model"]["lstm_cell_size"] = 512
+        hyperparams["model"]["fcnet_hiddens"] = [int(x) for x in hyperparams["fcnet_hiddens"].split(",")]
+        logger.info(f"Trial {trial.number}: Hyperparameters = {hyperparams}")
 
-    # Train and automatically report via tune.report()
-    env = gym.make('forex-v0', **ENV_BASE_CONFIG)
-    trainer = train_model(hyperparams, tune_mode=True)
+        result = train_model(hyperparams, tune_mode=True)
+        print(result)
+        return result
+
+    except Exception as e:
+        logger.error(f"Trial {trial.number} failed: {str(e)}")
+        raise optuna.TrialPruned()
 
 # ======================
 # Main Execution
 # ======================
 def train_forex_model():
-    config = {
-        "logger_config": {"logdir": "logs"},
-        "env": "forex-v0",
-        "env_config": ENV_BASE_CONFIG,
-        "num_epochs": TUNING_SETTINGS["tune_epochs"],
-        "model": {
-            "use_lstm": True,
-            "max_seq_len": ENV_BASE_CONFIG["window_size"],
-            "lstm_cell_size": 128,
-            "fcnet_hiddens": [256, 256],
-            "fcnet_activation": "relu",
-        },
-        "lr": 0.00005,
-        "gamma": 0.99,
-        "train_batch_size": 4000
-    }
+    """Execute the training pipeline with Optuna tuning and final training."""
+    try:
+        # Base configuration for final training
+        base_config = {
+            "env": "forex-v0",
+            "env_config": ENV_BASE_CONFIG,
+            "num_epochs": TUNING_SETTINGS["tune_epochs"],
+            "model": {
+                "use_lstm": True,
+                "max_seq_len": ENV_BASE_CONFIG["window_size"],
+                "lstm_cell_size": 128,
+                "fcnet_hiddens": [256, 256],
+                "fcnet_activation": "relu",
+            },
+            "lr": 0.00005,
+            "gamma": 0.99,
+            "train_batch_size": 4000
+        }
 
-    # Define resources per trial.
-    num_rollout_workers = 1  # Consistent with PPOConfig.
-    resources_per_trial = PlacementGroupFactory(
-        [{'CPU': 1.0, 'GPU': 0.0 if TUNING_SETTINGS["resource"]["num_gpus"] == 0 else 0.5}] +
-        [{'CPU': 1.0, 'GPU': 0.0 if TUNING_SETTINGS["resource"]["num_gpus"] == 0 else 0.5}] * num_rollout_workers
-    )
+        # Optuna optimization with persistent storage (ref: Optuna docs)
+        study = optuna.create_study(
+            direction="maximize",
+            storage="sqlite:///forex_study.db",
+            study_name="forex_ppo",
+            load_if_exists=True
+        )
+        study.optimize(objective, n_trials=TUNING_SETTINGS["n_trials"], n_jobs=1)  # Sequential for stability
 
-    analysis = tune.run(
-        tune.with_parameters(train_model, tune_mode=False),
-        config=config,
-        storage_path=f"file://{os.path.abspath('logs')}",
-        stop={"training_iteration": 100},
-        checkpoint_at_end=False,
-        keep_checkpoints_num=1,
-        checkpoint_score_attr="episode_reward_mean",
-        metric="episode_reward_mean",
-        mode="max",
-        verbose=1,
-        resources_per_trial=resources_per_trial
-    )
+        logger.info(f"Best trial - Value: {study.best_value}, Params: {study.best_params}")
 
-    best_checkpoint = analysis.get_best_checkpoint(
-        trial=analysis.get_best_trial("episode_reward_mean", mode="max"),
-        metric="episode_reward_mean",
-        mode="max"
-    )
+        # Update config with best hyperparameters
+        best_config = base_config.copy()
+        best_config.update({
+            "lr": study.best_params["lr"],
+            "gamma": study.best_params["gamma"],
+            "train_batch_size": study.best_params["train_batch_size"],
+            "model": {
+                **best_config["model"],
+                "fcnet_hiddens": [int(x) for x in study.best_params["fcnet_hiddens"].split(",")],
+                "fcnet_activation": study.best_params["activation"],
+                "lstm_cell_size": study.best_params["lstm_cell_size"]
+            },
+            "num_epochs": TUNING_SETTINGS["final_epochs"]
+        })
 
-    print(f"Best checkpoint saved at: {best_checkpoint}")
+        # Resource allocation with RLlib recommendations
+        num_rollout_workers = 1
+        resources_per_trial = PlacementGroupFactory(
+            [{"CPU": 2.0, "GPU": 0.5 if TUNING_SETTINGS["resource"]["num_gpus"] > 0 else 0.0}] +
+            [{"CPU": 1.0, "GPU": 0.0}] * num_rollout_workers
+        )
 
-    # Save the best performing model.
-    env = gym.make('forex-v0', **ENV_BASE_CONFIG)
-    final_trainer = train_model(analysis.best_config, tune_mode=False)
-    final_trainer.restore(best_checkpoint)
-    final_trainer.save("trained_forex_model")
+        # Final training with Tune
+        analysis = tune.run(
+            tune.with_parameters(train_model, tune_mode=False),
+            config=best_config,
+            local_dir=os.path.abspath("logs"),
+            stop={"training_iteration": TUNING_SETTINGS["final_epochs"]},
+            checkpoint_at_end=True,
+            checkpoint_freq=10,  # Regular checkpoints for recovery
+            keep_checkpoints_num=1,
+            checkpoint_score_attr="episode_reward_mean",
+            metric="episode_reward_mean",
+            mode="max",
+            verbose=1,
+            resources_per_trial=resources_per_trial
+        )
 
-    print("Training completed. Best model saved.")
+        best_trial = analysis.get_best_trial("episode_reward_mean", mode="max")
+        best_checkpoint = analysis.get_best_checkpoint(best_trial, metric="episode_reward_mean", mode="max")
+        logger.info(f"Best checkpoint: {best_checkpoint}")
+
+        # Save final model
+        final_trainer = train_model(best_config, tune_mode=False)
+        final_trainer.restore(best_checkpoint)
+        save_path = final_trainer.save(os.path.join("trained_forex_model", "final_model"))
+        logger.info(f"Final model saved at: {save_path}")
+
+    except Exception as e:
+        logger.error(f"Main execution failed: {str(e)}")
+        raise
 
 if __name__ == "__main__":
-    # Create the environment and ensure it conforms to the Gymnasium API.
-    env = gym.make('forex-v0', **ENV_BASE_CONFIG)
-    check_env(env.unwrapped)
+    try:
+        env = gym.make("forex-v0", **ENV_BASE_CONFIG)
+        check_env(env.unwrapped)
+        logger.info("Environment validated successfully")
 
-    ray.init(num_cpus=4, num_gpus=1)
-    train_forex_model()
-    ray.shutdown()
+        ray.init(
+            num_cpus=4,
+            num_gpus=TUNING_SETTINGS["resource"]["num_gpus"],
+            ignore_reinit_error=True  # Avoid errors on re-run
+        )
+        train_forex_model()
+
+    except Exception as e:
+        logger.error(f"Program failed: {str(e)}")
+    finally:
+        ray.shutdown()
+        logger.info("Ray resources released")

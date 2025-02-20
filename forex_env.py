@@ -59,6 +59,7 @@ class ForexEnv(gym.Env):
         self.leverage = leverage
         self.spread = spread_pips
         self.render_frequency = render_frequency  # Controls rendering frequency.
+        self.max_steps = self.n_timesteps  # Maximum number of steps.
         
         # Position management.
         self.position = 0  # 0: flat, 1: long, -1: short
@@ -70,6 +71,12 @@ class ForexEnv(gym.Env):
         self.total_profit = 0
         self.done = False
         self.truncated = False
+
+        self.spec = gym.envs.registration.EnvSpec(
+            id='forex-v0',
+            entry_point='forex_env:ForexEnv',
+            max_episode_steps=self.max_steps
+        )
 
     def reset(self, *, seed=None, options=None):
         self.seed(seed)
@@ -167,7 +174,7 @@ class ForexEnv(gym.Env):
         reward = self.last_profit - time_penalty + drawdown_penalty
         reward_normalized = reward / self.initial_balance
 
-        if self.current_step >= self.n_timesteps:
+        if self.current_step >= self.max_steps:
             self.done = True
         if self.truncated or (self.balance <= 0.4 * self.initial_balance):
             self.truncated = True
