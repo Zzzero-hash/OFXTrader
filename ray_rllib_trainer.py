@@ -10,7 +10,6 @@ from gymnasium.utils.env_checker import check_env
 from forex_env import ForexEnv
 import optuna
 import gymnasium as gym
-import tempfile
 
 # Configure logging for detailed tracking
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -27,10 +26,13 @@ ENV_BASE_CONFIG = {
     "leverage": 50  
 }
 
+# Number of rollout workers to use
+NUM_ROLLOUT_WORKERS = 2  # Reduced to conserve resources
+
 TUNING_SETTING = {
-    "n_trials": 10,
-    "tune_epochs": 20,  # Epochs for hyperparameter tuning
-    "final_epochs": 100,  # Epochs for final training
+    "n_trials": 5,  # Reduced for faster feedback
+    "tune_epochs": 10,  # Reduced for faster feedback 
+    "final_epochs": 20,  # Reduced for faster feedback
     "resource": {"num_gpus": 1 if torch.cuda.is_available() else 0}  # Dynamic GPU usage
 }
 
@@ -47,17 +49,26 @@ def train_model(config):
         algo_config = PPOConfig()
         algo_config.environment(env="forex-v0", env_config=ENV_BASE_CONFIG)
         algo_config.framework("torch")
-        algo_config.resources(**TUNING_SETTING["resource"])
+        
+        # Set resources for the main algorithm - this is critical
+        algo_config.resources(
+            num_gpus=1 if torch.cuda.is_available() else 0,  # Allocate fraction of GPU to main process
+            num_cpus_per_worker=1,
+            num_gpus_per_worker=0 # No GPU for workers to simplify
+        )
+        
         algo_config.training(
             train_batch_size=config["train_batch_size"],
             lr=config["lr"],
             gamma=config["gamma"],
             model=config["model"]
         )
+        
         algo_config.rollouts(
-            num_rollout_workers=config.get("num_rollout_workers", 4),
-            rollout_fragment_length='auto'  # Match max_steps for episode completion
+            num_rollout_workers=NUM_ROLLOUT_WORKERS,
+            rollout_fragment_length='auto'
         )
+        
         algo_config.exploration(
             explore=True,
             exploration_config={"type": "EpsilonGreedy", "initial_epsilon": 1.0, "final_epsilon": 0.02}
@@ -78,16 +89,11 @@ def train_model(config):
             if mean_reward > best_mean_reward and np.isfinite(mean_reward):
                 best_mean_reward = mean_reward
             
-            # Create checkpoint for intermediate reporting
-            if epoch % 5 == 0:
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    checkpoint_path = trainer.save(temp_dir)
-                    tune.report(mean_reward=mean_reward, checkpoint=checkpoint_path)
+            # Just report metrics every iteration without checkpoints
+            tune.report(mean_reward=mean_reward)
         
-        # Final checkpoint and report
-        with tempfile.TemporaryDirectory() as temp_dir:
-            checkpoint_path = trainer.save(temp_dir)
-            tune.report(mean_reward=best_mean_reward, checkpoint=checkpoint_path)
+        # Final report with final mean reward
+        tune.report(mean_reward=best_mean_reward)
         
         trainer.stop()  # Clean up resources
 
@@ -106,42 +112,42 @@ def train_forex_model():
             "num_epochs": TUNING_SETTING["tune_epochs"],
             "model_use_lstm": True,
             "model_max_seq_len": ENV_BASE_CONFIG["window_size"],
-            "num_rollout_workers": 3
+            "num_rollout_workers": NUM_ROLLOUT_WORKERS
         }
 
         # Define the search space for Optuna
         search_space = {
-            "train_batch_size": tune.choice([2048, 4096, 8192]),
-            "lr": tune.loguniform(1e-6, 1e-3),
+            "train_batch_size": tune.choice([2048, 4096]),
+            "lr": tune.loguniform(1e-5, 1e-3),
             "gamma": tune.uniform(0.9, 0.999),
             "model": {
                 "custom_model": None,
                 "use_lstm": True,
-                "lstm_cell_size": tune.choice([128, 256, 512, 1024, 2048]),
+                "lstm_cell_size": tune.choice([128, 256]),
                 "max_seq_len": ENV_BASE_CONFIG["window_size"],
-                "fcnet_hiddens": tune.choice([[256, 256], [512, 512], [1024, 512], [1024, 1024]]),
-                "fcnet_activation": tune.choice(["relu", "tanh", "swish"])
+                "fcnet_hiddens": tune.choice([[128, 128], [256, 256]]),
+                "fcnet_activation": tune.choice(["relu", "tanh"])
             }
         }
         
         # Setup hyperparameter search with Optuna - using minimal parameters
         optuna_search = OptunaSearch(metric="mean_reward", mode="max")
         
-        # Simple tune.run with most basic parameters for compatibility
+        # Create proper placement group factory for resource allocation
+        # Main process gets CPU + fraction of GPU, each worker gets just CPU
+        pg = tune.PlacementGroupFactory(
+            [{"CPU": 1, "GPU": 0.5}] + [{"CPU": 1}] * NUM_ROLLOUT_WORKERS
+        )
+        
+        # Minimal tune.run with correct resource allocation
         analysis = tune.run(
             train_model,
             config={**base_config, **search_space},
             search_alg=optuna_search,
             num_samples=TUNING_SETTING["n_trials"],
-            resources_per_trial={
-                "cpu": 1, 
-                "gpu": TUNING_SETTING["resource"]["num_gpus"] / (base_config["num_rollout_workers"] + 1)
-            },
+            resources_per_trial=pg,  # Use the placement group factory
             local_dir=os.path.abspath("logs"),
             verbose=1,
-            checkpoint_freq=5,
-            keep_checkpoints_num=1,
-            checkpoint_score_attr="mean_reward",
             max_failures=3
         )
 
@@ -153,33 +159,46 @@ def train_forex_model():
         # Update base config with best parameters for final training
         best_config["num_epochs"] = TUNING_SETTING["final_epochs"]
 
-        # Simplified final training with best config
+        # Final training with best config
         final_analysis = tune.run(
             train_model,
             config=best_config,
+            resources_per_trial=pg,  # Use the same placement group factory
             local_dir=os.path.abspath("logs"),
-            resources_per_trial={
-                "cpu": 1, 
-                "gpu": TUNING_SETTING["resource"]["num_gpus"]
-            },
-            checkpoint_freq=10,
-            keep_checkpoints_num=1,
-            checkpoint_score_attr="mean_reward",
             stop={"training_iteration": TUNING_SETTING["final_epochs"]},
             verbose=1,
             name="forex_final_training",
             max_failures=3
         )
         
-        # Get the best checkpoint
+        # Get the best trial
         best_final_trial = final_analysis.get_best_trial("mean_reward", mode="max")
-        best_checkpoint = final_analysis.get_best_checkpoint(best_final_trial, "mean_reward", "max")
-        logger.info(f"Best checkpoint: {best_checkpoint}")
+        logger.info(f"Best final trial - Value: {best_final_trial.last_result['mean_reward']}")
 
-        # Save final model
-        final_trainer = PPOConfig().update_from_dict(best_config).build()
-        final_trainer.restore(best_checkpoint)
-        save_path = final_trainer.save(os.path.join("trained_forex_model", "final_model"))
+        # Save the model directly outside of Ray Tune
+        final_config = PPOConfig()
+        final_config.environment(env="forex-v0", env_config=ENV_BASE_CONFIG)
+        final_config.framework("torch")
+        final_config.resources(
+            num_gpus=1 if torch.cuda.is_available() else 0,  # Use full GPU for final training
+            num_cpus_per_worker=1
+        )
+        final_config.training(
+            train_batch_size=best_config["train_batch_size"],
+            lr=best_config["lr"],
+            gamma=best_config["gamma"],
+            model=best_config["model"]
+        )
+        final_trainer = final_config.build()
+        
+        # Train the final model with the best parameters
+        for i in range(10):  # Short final training
+            final_trainer.train()
+        
+        # Save the model
+        save_dir = os.path.join("trained_forex_model", "final_model")
+        os.makedirs(os.path.dirname(save_dir), exist_ok=True)
+        save_path = final_trainer.save(save_dir)
         logger.info(f"Final model saved at: {save_path}")
 
     except Exception as e:
