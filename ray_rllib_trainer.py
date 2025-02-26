@@ -1,6 +1,7 @@
 import os
 import ray
 import torch
+import numpy as np
 import logging
 from ray import tune
 from ray.rllib.algorithms.ppo import PPOConfig
@@ -9,7 +10,7 @@ from gymnasium.utils.env_checker import check_env
 from forex_env import ForexEnv
 import optuna
 import gymnasium as gym
-from ray.tune import Tuner, PlacementGroupFactory
+import tempfile
 
 # Configure logging for detailed tracking
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -76,10 +77,19 @@ def train_model(config):
 
             if mean_reward > best_mean_reward and np.isfinite(mean_reward):
                 best_mean_reward = mean_reward
-
-        tune.report(mean_reward=best_mean_reward)
+            
+            # Create checkpoint for intermediate reporting
+            if epoch % 5 == 0:
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    checkpoint_path = trainer.save(temp_dir)
+                    tune.report(mean_reward=mean_reward, checkpoint=checkpoint_path)
+        
+        # Final checkpoint and report
+        with tempfile.TemporaryDirectory() as temp_dir:
+            checkpoint_path = trainer.save(temp_dir)
+            tune.report(mean_reward=best_mean_reward, checkpoint=checkpoint_path)
+        
         trainer.stop()  # Clean up resources
-        return {"mean_reward": best_mean_reward}
 
     except Exception as e:
         logger.error(f"Training failed: {str(e)}")
@@ -114,56 +124,56 @@ def train_forex_model():
             }
         }
         
+        # Setup hyperparameter search with Optuna - using minimal parameters
         optuna_search = OptunaSearch(metric="mean_reward", mode="max")
-
-        # Configure the Tuner
-        tuner = Tuner(
+        
+        # Simple tune.run with most basic parameters for compatibility
+        analysis = tune.run(
             train_model,
-            param_space={**base_config, **search_space},
-            tune_config=tune.TuneConfig(
-                search_alg=optuna_search,
-                num_samples=TUNING_SETTING["n_trials"],
-                resources_per_trial=PlacementGroupFactory(
-                    [{'CPU': 1, 'GPU': 1}] + [{'CPU': 1}] * base_config["num_rollout_workers"]
-                ),
-                max_concurrent_trials=1
-            )
+            config={**base_config, **search_space},
+            search_alg=optuna_search,
+            num_samples=TUNING_SETTING["n_trials"],
+            resources_per_trial={
+                "cpu": 1, 
+                "gpu": TUNING_SETTING["resource"]["num_gpus"] / (base_config["num_rollout_workers"] + 1)
+            },
+            local_dir=os.path.abspath("logs"),
+            verbose=1,
+            checkpoint_freq=5,
+            keep_checkpoints_num=1,
+            checkpoint_score_attr="mean_reward",
+            max_failures=3
         )
-        results = tuner.fit()
 
         # Get best configuration
-        best_result = results.get_best_trial("mean_reward", mode="max")
-        best_config = best_result.config
-        logger.info(f"Best trial - Value: {best_result.metrics['mean_reward']}, Params: {best_config}")
+        best_trial = analysis.get_best_trial("mean_reward", mode="max")
+        best_config = best_trial.config
+        logger.info(f"Best trial - Value: {best_trial.last_result['mean_reward']}, Params: {best_config}")
 
         # Update base config with best parameters for final training
         best_config["num_epochs"] = TUNING_SETTING["final_epochs"]
 
-        # Resource allocation for final training
-        num_rollout_workers = best_config["num_rollout_workers"]
-        resources_per_trial = PlacementGroupFactory(
-            [{'CPU': 1, 'GPU': 1}] + [{'CPU': 1}] * num_rollout_workers
-        )
-
-        # Final training with best config
-        analysis = tune.run(
+        # Simplified final training with best config
+        final_analysis = tune.run(
             train_model,
             config=best_config,
             local_dir=os.path.abspath("logs"),
-            callbacks=DEFAULT_LOGGERS,
-            stop={"training_iteration": TUNING_SETTING["final_epochs"]},
-            checkpoint_at_end=True,
+            resources_per_trial={
+                "cpu": 1, 
+                "gpu": TUNING_SETTING["resource"]["num_gpus"]
+            },
             checkpoint_freq=10,
             keep_checkpoints_num=1,
             checkpoint_score_attr="mean_reward",
-            metric="mean_reward",
-            mode="max",
+            stop={"training_iteration": TUNING_SETTING["final_epochs"]},
             verbose=1,
-            resources_per_trial=resources_per_trial
+            name="forex_final_training",
+            max_failures=3
         )
-
-        best_trial = analysis.get_best_trial("mean_reward", mode="max")
-        best_checkpoint = analysis.get_best_checkpoint(best_trial, metric="mean_reward", mode="max")
+        
+        # Get the best checkpoint
+        best_final_trial = final_analysis.get_best_trial("mean_reward", mode="max")
+        best_checkpoint = final_analysis.get_best_checkpoint(best_final_trial, "mean_reward", "max")
         logger.info(f"Best checkpoint: {best_checkpoint}")
 
         # Save final model

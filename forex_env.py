@@ -5,6 +5,10 @@ from gymnasium import spaces
 from data_handler import DataHandler
 from gymnasium.envs.registration import register
 import gymnasium.utils.seeding as seeding
+import logging
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 class ForexEnv(gym.Env):
     def __init__(self, instrument="EUR_USD", start_date="2022-01-01", end_date="2023-01-01", 
