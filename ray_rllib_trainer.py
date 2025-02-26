@@ -1,5 +1,4 @@
 import os
-import numpy as np
 import ray
 import torch
 import logging
@@ -10,9 +9,7 @@ from gymnasium.utils.env_checker import check_env
 from forex_env import ForexEnv
 import optuna
 import gymnasium as gym
-from ray.tune import PlacementGroupFactory
-from ray.tune.logger import DEFAULT_LOGGERS
-from ray.tune import Tuner
+from ray.tune import Tuner, PlacementGroupFactory
 
 # Configure logging for detailed tracking
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -26,7 +23,7 @@ ENV_BASE_CONFIG = {
     "granularity": "M1",
     "window_size": 14,  # Sequence length for LSTM
     "initial_balance": 1000,
-    "leverage": 10  # Reduced from 50 for stability
+    "leverage": 50  
 }
 
 TUNING_SETTING = {
@@ -57,8 +54,8 @@ def train_model(config):
             model=config["model"]
         )
         algo_config.rollouts(
-            num_rollout_workers=4,
-            rollout_fragment_length=500  # Match max_steps for episode completion
+            num_rollout_workers=config.get("num_rollout_workers", 4),
+            rollout_fragment_length='auto'  # Match max_steps for episode completion
         )
         algo_config.exploration(
             explore=True,
@@ -97,53 +94,40 @@ def train_forex_model():
             "env": "forex-v0",
             "env_config": ENV_BASE_CONFIG,
             "num_epochs": TUNING_SETTING["tune_epochs"],
-            "model": {
-                "use_lstm": True,
-                "max_seq_len": ENV_BASE_CONFIG["window_size"],
-                "lstm_cell_size": 128,
-                "fcnet_hiddens": [256, 256],
-                "fcnet_activation": "relu",
-            },
-            "lr": 0.00005,
-            "gamma": 0.99,
-            "train_batch_size": 4000
+            "model_use_lstm": True,
+            "model_max_seq_len": ENV_BASE_CONFIG["window_size"],
+            "num_rollout_workers": 3
         }
 
         # Define the search space for Optuna
-        optuna_search = OptunaSearch(
-            space={
-                "model": {
-                    "use_lstm": True,
-                    "max_seq_len": ENV_BASE_CONFIG["window_size"],
-                    "lstm_cell_size": tune.choice([256, 512]),
-                    "fcnet_hiddens": tune.choice([[256, 256], [512, 256], [512, 512], [1024, 512]]),
-                    "fcnet_activation": tune.choice(["relu", "tanh"])
-                },
-                "lr": tune.loguniform(1e-5, 1e-3),
-                "gamma": tune.uniform(0.9, 0.999),
-                "train_batch_size": tune.choice([2048, 4096, 8192])
-            },
-            metric="mean_reward",
-            mode="max",
-            storage="sqlite:///forex_study.db",  # Use the RDB storage
-            study_name="forex_ppo",
-            load_if_exists=True
-        )
+        search_space = {
+            "train_batch_size": tune.choice([2048, 4096, 8192]),
+            "lr": tune.loguniform(1e-6, 1e-3),
+            "gamma": tune.uniform(0.9, 0.999),
+            "model": {
+                "custom_model": None,
+                "use_lstm": True,
+                "lstm_cell_size": tune.choice([128, 256, 512, 1024, 2048]),
+                "max_seq_len": ENV_BASE_CONFIG["window_size"],
+                "fcnet_hiddens": tune.choice([[256, 256], [512, 512], [1024, 512], [1024, 1024]]),
+                "fcnet_activation": tune.choice(["relu", "tanh", "swish"])
+            }
+        }
+        
+        optuna_search = OptunaSearch(metric="mean_reward", mode="max")
 
         # Configure the Tuner
-        tuner = tune.Tuner(
-            tune.with_parameters(train_model),  # Pass the training function directly
-            run_config=ray.tune.RunConfig(
-                name="forex_ppo",
-                local_dir=os.path.abspath("logs"),
-                stop={"training_iteration": TUNING_SETTING["tune_epochs"]},
-                callbacks=[ray.tune.logger.TBXLoggerCallback()],
-            ),
+        tuner = Tuner(
+            train_model,
+            param_space={**base_config, **search_space},
             tune_config=tune.TuneConfig(
                 search_alg=optuna_search,
                 num_samples=TUNING_SETTING["n_trials"],
-            ),
-            param_space=base_config  # Pass the base config as the param_space
+                resources_per_trial=PlacementGroupFactory(
+                    [{'CPU': 1, 'GPU': 1}] + [{'CPU': 1}] * base_config["num_rollout_workers"]
+                ),
+                max_concurrent_trials=1
+            )
         )
         results = tuner.fit()
 
@@ -156,10 +140,9 @@ def train_forex_model():
         best_config["num_epochs"] = TUNING_SETTING["final_epochs"]
 
         # Resource allocation for final training
-        num_rollout_workers = 1
+        num_rollout_workers = best_config["num_rollout_workers"]
         resources_per_trial = PlacementGroupFactory(
-            [{"CPU": 2.0, "GPU": 0.5 if TUNING_SETTING["resource"]["num_gpus"] > 0 else 0.0}] +
-            [{"CPU": 1.0, "GPU": 0.0}] * num_rollout_workers
+            [{'CPU': 1, 'GPU': 1}] + [{'CPU': 1}] * num_rollout_workers
         )
 
         # Final training with best config

@@ -25,7 +25,7 @@ class ForexEnv(gym.Env):
         self.leverage = leverage
         self.spread = spread_pips
         self.render_frequency = render_frequency
-        self.max_steps = 500  # Reduced for faster feedback
+        self.max_steps = 50000  # Reduced for faster feedback
         self.position = 0
         self.entry_price = None
         self.entry_step = 0
