@@ -8,7 +8,6 @@ from ray.rllib.algorithms.ppo import PPOConfig
 from ray.tune.search.optuna import OptunaSearch
 from gymnasium.utils.env_checker import check_env
 from forex_env import ForexEnv
-import optuna
 import gymnasium as gym
 
 # Configure logging for detailed tracking
@@ -16,23 +15,24 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # Shared Configuration
+INSTRUMENTS = ['EUR_USD', 'USD_JPY']
 ENV_BASE_CONFIG = {
-    "instrument": "EUR_USD",
+    "instruments": INSTRUMENTS,
     "start_date": "2022-01-01",
     "end_date": "2023-01-01",
     "granularity": "M1",
-    "window_size": 14,  # Sequence length for LSTM
     "initial_balance": 1000,
-    "leverage": 50  
+    "leverage": 50,
+    "spread_pips": 0.001,
+    "render_frequency": 10000
 }
 
-# Number of rollout workers to use
-NUM_ROLLOUT_WORKERS = 2  # Reduced to conserve resources
+NUM_ROLLOUT_WORKERS = 2  # Number of parallel workers
 
 TUNING_SETTING = {
-    "n_trials": 5,  # Reduced for faster feedback
-    "tune_epochs": 10,  # Reduced for faster feedback 
-    "final_epochs": 20,  # Reduced for faster feedback
+    "n_trials": 5,      # Number of tuning trials
+    "tune_epochs": 10,  # Epochs for tuning 
+    "final_epochs": 20, # Epochs for final training
     "resource": {"num_gpus": 1 if torch.cuda.is_available() else 0}  # Dynamic GPU usage
 }
 
@@ -41,22 +41,23 @@ tune.register_env("forex-v0", lambda config: ForexEnv(**config))
 
 # Training Function
 def train_model(config):
-    """Train the PPO model and report results."""
+    """Train the PPO model for multi-instrument Forex trading."""
     try:
         logger.info(f"Training started - CUDA: {torch.cuda.is_available()}")
         
-        # Configure PPO with RLlib's best practices
+        # Configure PPO for multi-instrument setup
         algo_config = PPOConfig()
         algo_config.environment(env="forex-v0", env_config=ENV_BASE_CONFIG)
         algo_config.framework("torch")
         
-        # Set resources for the main algorithm - this is critical
+        # Resource allocation
         algo_config.resources(
-            num_gpus=1 if torch.cuda.is_available() else 0,  # Allocate fraction of GPU to main process
+            num_gpus=1 if torch.cuda.is_available() else 0,  
             num_cpus_per_worker=1,
-            num_gpus_per_worker=0 # No GPU for workers to simplify
+            num_gpus_per_worker=0 
         )
         
+        # Training settings
         algo_config.training(
             train_batch_size=config["train_batch_size"],
             lr=config["lr"],
@@ -74,6 +75,7 @@ def train_model(config):
             exploration_config={"type": "EpsilonGreedy", "initial_epsilon": 1.0, "final_epsilon": 0.02}
         )
 
+        # Build and train the model
         trainer = algo_config.build()
         best_mean_reward = -float('inf')
 
@@ -103,7 +105,7 @@ def train_model(config):
 
 # Main Execution
 def train_forex_model():
-    """Execute the training pipeline with Optuna tuning and final training."""
+    """Execute the training pipeline with hyperparameter tuning and final training."""
     try:
         # Base configuration for final training
         base_config = {
@@ -111,11 +113,10 @@ def train_forex_model():
             "env_config": ENV_BASE_CONFIG,
             "num_epochs": TUNING_SETTING["tune_epochs"],
             "model_use_lstm": True,
-            "model_max_seq_len": ENV_BASE_CONFIG["window_size"],
             "num_rollout_workers": NUM_ROLLOUT_WORKERS
         }
 
-        # Define the search space for Optuna
+        # Hyperparameter search space 
         search_space = {
             "train_batch_size": tune.choice([2048, 4096]),
             "lr": tune.loguniform(1e-5, 1e-3),
@@ -124,22 +125,21 @@ def train_forex_model():
                 "custom_model": None,
                 "use_lstm": True,
                 "lstm_cell_size": tune.choice([128, 256]),
-                "max_seq_len": ENV_BASE_CONFIG["window_size"],
                 "fcnet_hiddens": tune.choice([[128, 128], [256, 256]]),
                 "fcnet_activation": tune.choice(["relu", "tanh"])
             }
         }
         
-        # Setup hyperparameter search with Optuna - using minimal parameters
+        # Optuna search for hyperparameter tuning
         optuna_search = OptunaSearch(metric="mean_reward", mode="max")
         
-        # Create proper placement group factory for resource allocation
-        # Main process gets CPU + fraction of GPU, each worker gets just CPU
+        # Resource allocation with placement groups
+        # Each trial will use 1 CPU and 1 GPU, plus 1 CPU for each rollout worker
         pg = tune.PlacementGroupFactory(
-            [{"CPU": 1, "GPU": 0.5}] + [{"CPU": 1}] * NUM_ROLLOUT_WORKERS
+            [{"CPU": 1, "GPU": 1}] + [{"CPU": 1}] * NUM_ROLLOUT_WORKERS
         )
         
-        # Minimal tune.run with correct resource allocation
+        # Hyperparameter tuning
         analysis = tune.run(
             train_model,
             config={**base_config, **search_space},
@@ -163,7 +163,7 @@ def train_forex_model():
         final_analysis = tune.run(
             train_model,
             config=best_config,
-            resources_per_trial=pg,  # Use the same placement group factory
+            resources_per_trial=pg,  
             local_dir=os.path.abspath("logs"),
             stop={"training_iteration": TUNING_SETTING["final_epochs"]},
             verbose=1,
@@ -171,16 +171,16 @@ def train_forex_model():
             max_failures=3
         )
         
-        # Get the best trial
+        # Log final results
         best_final_trial = final_analysis.get_best_trial("mean_reward", mode="max")
         logger.info(f"Best final trial - Value: {best_final_trial.last_result['mean_reward']}")
 
-        # Save the model directly outside of Ray Tune
+        # Save the final model
         final_config = PPOConfig()
         final_config.environment(env="forex-v0", env_config=ENV_BASE_CONFIG)
         final_config.framework("torch")
         final_config.resources(
-            num_gpus=1 if torch.cuda.is_available() else 0,  # Use full GPU for final training
+            num_gpus=1 if torch.cuda.is_available() else 0,
             num_cpus_per_worker=1
         )
         final_config.training(
@@ -191,7 +191,6 @@ def train_forex_model():
         )
         final_trainer = final_config.build()
         
-        # Train the final model with the best parameters
         for i in range(10):  # Short final training
             final_trainer.train()
         
@@ -206,10 +205,19 @@ def train_forex_model():
         raise
 
 if __name__ == "__main__":
-    try:
-        env = gym.make("forex-v0", **ENV_BASE_CONFIG)
-        check_env(env.unwrapped)
-        logger.info("Environment validated successfully")
+    try:        # Initialize Ray and fetch data for training
+        from data_handler import DataHandler  
+        data_handler = DataHandler(api_key=data_handler.api_key, account=data_handler.account)
+        data_array, feature_names = data_handler.get_data(
+            instruments=INSTRUMENTS,
+            start_date=ENV_BASE_CONFIG["start_date"],
+            end_date=ENV_BASE_CONFIG["end_date"],
+            granularity=ENV_BASE_CONFIG["granularity"],
+            window_size=14
+        )
+        ENV_BASE_CONFIG["data_array"] = data_array
+        ENV_BASE_CONFIG["feature_names"] = feature_names
+
         ray.init(
             num_cpus=4,
             num_gpus=TUNING_SETTING["resource"]["num_gpus"],

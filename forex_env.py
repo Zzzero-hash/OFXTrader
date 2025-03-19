@@ -36,7 +36,7 @@ class ForexEnv(gym.Env):
         """Reset the environment to the initial state."""
         self.balance = self.initial_balance
         self.positions = [0] * self.n_instruments # 0: no position, 1: long, -1: short
-        self.entry_price = [None] * self.n_instruments
+        self.entry_prices = [None] * self.n_instruments
         self.unrealized_pnls = [0.0] * self.n_instruments
         self.current_step = 0
         self.total_value = self.initial_balance
@@ -64,7 +64,7 @@ class ForexEnv(gym.Env):
         # Update unrealized P/L for open positions
         for i in range(self.n_instruments):
             if self.positions[i] == 1:
-                self.unrealized_pnls[i] = (current_prices[i] - self.entry_price[i]) * self.leverage
+                self.unrealized_pnls[i] = (current_prices[i] - self.entry_prices[i]) * self.leverage
             elif self.positions[i] == -1:
                 self.unrealized_pnls[i] = (self.entry_prices[i] - current_prices[i]) * self.leverage
             else:
@@ -101,7 +101,7 @@ class ForexEnv(gym.Env):
         # Recalculate unrealized P/L after actions
         for i in range(self.n_instruments):
             if self.positions[i] == 1:
-                self.unrealized_pnls[i] = (current_prices[i] = self.entry_prices[i]) * self.leverage
+                self.unrealized_pnls[i] = (current_prices[i] - self.entry_prices[i]) * self.leverage  # Long
             elif self.positions[i] == -1:
                 self.unrealized_pnls[i] = (self.entry_prices[i] - current_prices[i]) * self.leverage
             else:
