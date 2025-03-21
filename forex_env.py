@@ -1,11 +1,9 @@
 import gymnasium as gym
 import numpy as np
-import pandas as pd
 from gymnasium import spaces
-from data_handler import DataHandler
+from gymnasium.spaces import Tuple, Discrete
 from collections import deque
-from ray.tune import register_env
-import gymnasium.utils.seeding as seeding
+from gymnasium.utils import seeding
 import logging
 
 # Configure logging
@@ -62,13 +60,13 @@ class ForexEnv(gym.Env):
         # Observation space: market data + positions + unrealized P/L for each instrument
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(self.n_features + 2 * self.n_instruments,), dtype=np.float32)
 
-        # Action space: MultiDiscrete for each instrument (0: close, 1: long, 2: short)
-        self.action_space = spaces.MultiDiscrete([3] * self.n_instruments)
+        # Action space: Tuple of Discrete spaces for each instrument (0: close, 1: long, 2: short)
+        self.action_space = Tuple([Discrete(3) for _ in range(self.n_instruments)])
 
     def reset(self, *, seed=None, options=None):
         """Reset the environment to the initial state."""
         self.balance = self.initial_balance
-        self.positions = [0] * self.n_instruments # 0: no position, 1: long, -1: short
+        self.positions = [0] * self.n_instruments  # 0: no position, 1: long, -1: short
         self.entry_prices = [None] * self.n_instruments
         self.unrealized_pnls = [0.0] * self.n_instruments
         self.current_step = 0
@@ -85,31 +83,25 @@ class ForexEnv(gym.Env):
         data = self.data_array[self.current_step]
         positions = np.array(self.positions, dtype=np.float32)
         unrealized_pnls = np.array(self.unrealized_pnls, dtype=np.float32)
-        return np.concatenate([data, positions, unrealized_pnls]
-                              )
+        return np.concatenate([data, positions, unrealized_pnls])
 
     def step(self, action):
-        # Ensure action is a numpy array and clip to valid range [0, 2]
-        if isinstance(action, (np.ndarray, list)):
-            action = np.array(action, dtype=np.int32)
-        elif isinstance(action, dict) and "actions" in action:
-            action = np.array(action["actions"], dtype=np.int32)
-        elif np.isscalar(action):
-            action = np.array([int(action)], dtype=np.int32)
-        else:
-            action = np.zeros(self.n_instruments, dtype=np.int32)
+        # Convert tuple action to NumPy array
+        action = np.array(action, dtype=np.int32)
         
-        # Clip actions to valid range [0, 2]
-        action = np.clip(action, 0, 2)
+        # Log the action for debugging
+        logger.info(f"Action received: {action}")
+        
+        # Ensure action is within valid range [0, 2]
+        if not all(0 <= a <= 2 for a in action):
+            logger.warning(f"Clipping invalid action: {action}")
+            action = np.clip(action, 0, 2)
 
         # Calculate the previous total before taking actions
         previous_total_value = self.total_value
 
         # Get current prices for each instrument
         current_prices = [self.data_array[self.current_step, self.close_indices[instr]] for instr in self.instruments]
-
-        # Verify the action is valid
-        assert self.action_space.contains(action), f"Invalid action: {action}"
 
         # Update unrealized P/L for open positions
         for i in range(self.n_instruments):
@@ -122,14 +114,14 @@ class ForexEnv(gym.Env):
 
         # Process actions for each instrument
         for i in range(self.n_instruments):
-            if action[i] == 0: # Close Position
+            if action[i] == 0:  # Close Position
                 if self.positions[i] != 0:
                     profit = self.unrealized_pnls[i]
                     self.balance += profit
                     self.positions[i] = 0
                     self.entry_prices[i] = None
                     self.unrealized_pnls[i] = 0.0
-            elif action[i] == 1: # Go Long
+            elif action[i] == 1:  # Go Long
                 if self.positions[i] == -1:
                     profit = self.unrealized_pnls[i]
                     self.balance += profit
@@ -138,7 +130,7 @@ class ForexEnv(gym.Env):
                 if self.positions[i] != 1:
                     self.entry_prices[i] = current_prices[i] + self.spread
                     self.positions[i] = 1
-            elif action[i] == 2: # Go Short
+            elif action[i] == 2:  # Go Short
                 if self.positions[i] == 1:
                     profit = self.unrealized_pnls[i]
                     self.balance += profit
@@ -151,7 +143,7 @@ class ForexEnv(gym.Env):
         # Recalculate unrealized P/L after actions
         for i in range(self.n_instruments):
             if self.positions[i] == 1:
-                self.unrealized_pnls[i] = (current_prices[i] - self.entry_prices[i]) * self.leverage  # Long
+                self.unrealized_pnls[i] = (current_prices[i] - self.entry_prices[i]) * self.leverage
             elif self.positions[i] == -1:
                 self.unrealized_pnls[i] = (self.entry_prices[i] - current_prices[i]) * self.leverage
             else:
@@ -162,7 +154,7 @@ class ForexEnv(gym.Env):
         change = self.total_value - previous_total_value
         self.past_changes.append(change)
         std_dev = np.std(self.past_changes) if len(self.past_changes) > 1 else 0.0
-        k = 0.1 # Risk aversion parameter
+        k = 0.1  # Risk aversion parameter
         reward = change - k * std_dev
 
         self.current_step += 1
@@ -175,12 +167,12 @@ class ForexEnv(gym.Env):
         return observation, reward, self.done, self.truncated, info
 
     def render(self, mode='human'):
-            """Render the current state of the environment."""
-            print(f'Step: {self.current_step}')
-            print(f'Balance: {self.balance:.2f}')
-            print(f'Total Value: {self.total_value:.2f}')
-            print(f'Positions: {self.positions}')
-            print('---------------------------------')
+        """Render the current state of the environment."""
+        print(f'Step: {self.current_step}')
+        print(f'Balance: {self.balance:.2f}')
+        print(f'Total Value: {self.total_value:.2f}')
+        print(f'Positions: {self.positions}')
+        print('---------------------------------')
 
     def close(self):
         pass
@@ -188,31 +180,3 @@ class ForexEnv(gym.Env):
     def seed(self, seed=None):
         self.np_random, seed = seeding.np_random(seed)
         return [seed]
-    
-def env_creator(env_config):
-    """Create a properly initialized ForexEnv with all required parameters."""
-    # Make sure all required parameters are present
-    required_params = ["instruments", "data_array", "feature_names"]
-    for param in required_params:
-        if param not in env_config:
-            raise ValueError(f"Missing required parameter: {param}")
-    
-    # Print debug info before creating environment
-    print(f"Creating environment with: instruments={env_config['instruments']}, "
-        f"data shape={env_config['data_array'].shape}, "
-        f"features={len(env_config['feature_names'])}")
-    
-    # Create the environment with all parameters
-    return ForexEnv(
-        instruments=env_config["instruments"],
-        data_array=env_config["data_array"],
-        feature_names=env_config["feature_names"],
-        initial_balance=env_config.get("initial_balance", 1000),
-        leverage=env_config.get("leverage", 10),
-        spread_pips=env_config.get("spread_pips", 0.0001),
-        max_steps=env_config.get("max_steps", 50000),
-        render_frequency=env_config.get("render_frequency", 1000)
-    )
-
-# Register with the new creator function
-register_env("forex-v0", env_creator)

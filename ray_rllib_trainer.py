@@ -4,6 +4,7 @@ import torch
 import numpy as np
 import logging
 from ray import tune
+from ray.air import session
 from ray.rllib.algorithms.ppo import PPOConfig
 from ray.tune.search.optuna import OptunaSearch
 from gymnasium.utils.env_checker import check_env
@@ -100,10 +101,6 @@ def train_model(config):
             result = trainer.train()
             mean_reward = result.get("episode_reward_mean", -float('inf'))
             logger.info(f"Epoch {epoch + 1}: Mean Reward = {mean_reward}")
-            # Add this to debug
-            sample_batch = trainer.workers.local_worker().sample()
-            actions = sample_batch["actions"]
-            logger.info(f"Sampled actions: {actions}")
             if not np.isfinite(mean_reward):
                 logger.warning(f"Non-finite reward: {mean_reward}")
                 mean_reward = -float('inf')
@@ -114,10 +111,10 @@ def train_model(config):
                 best_mean_reward = mean_reward
             
             # Just report metrics every iteration without checkpoints
-            tune.report(mean_reward=mean_reward)
+            session.report(mean_reward=mean_reward)
         
         # Final report with final mean reward
-        tune.report(mean_reward=best_mean_reward)
+        session.report(mean_reward=best_mean_reward)
         
         trainer.stop()  # Clean up resources
 
@@ -169,7 +166,7 @@ def train_forex_model():
         # Resource allocation with placement groups
         # Each trial will use 1 CPU and 1 GPU, plus 1 CPU for each rollout worker
         pg = tune.PlacementGroupFactory(
-            [{"CPU": 1, "GPU": 1}] + [{"CPU": 1}] * NUM_ROLLOUT_WORKERS
+            [{"CPU": 1, "GPU": 0.5}] + [{"CPU": 1}] * NUM_ROLLOUT_WORKERS
         )
         
         # Hyperparameter tuning
@@ -239,8 +236,10 @@ def train_forex_model():
 
 if __name__ == "__main__":
     try:        # Initialize Ray and fetch data for training
-        from data_handler import DataHandler  
+        from data_handler import DataHandler 
+        from ray.tune import register_env 
         data_handler = DataHandler()
+        register_env("forex-v0", lambda config: ForexEnv(**config))
         data_array, feature_names = data_handler.get_data(
             instruments=INSTRUMENTS,
             start_date=ENV_BASE_CONFIG["start_date"],
