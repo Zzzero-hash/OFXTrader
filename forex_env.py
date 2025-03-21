@@ -4,7 +4,7 @@ import pandas as pd
 from gymnasium import spaces
 from data_handler import DataHandler
 from collections import deque
-from gymnasium.envs.registration import register
+from ray.tune import register_env
 import gymnasium.utils.seeding as seeding
 import logging
 
@@ -19,7 +19,40 @@ class ForexEnv(gym.Env):
         self.data_array = data_array
         self.feature_names = feature_names
         self.n_timesteps, self.n_features = self.data_array.shape
-        self.close_indices = {instr: feature_names.index(f'{instr}_close') for instr in instruments}
+
+        # Debug output to understand data structure
+        print(f"Feature names: {feature_names}")
+        print(f"Data array shape: {data_array.shape}")
+        print(f"Instruments: {instruments}")
+        
+        # Try to find close prices more robustly
+        self.close_indices = {}
+        
+        # Method 1: Look for exact format '{instrument}_close'
+        for instr in instruments:
+            col_name = f"{instr}_close"
+            if col_name in feature_names:
+                self.close_indices[instr] = feature_names.index(col_name)
+        
+        # If not all instruments found, try method 2: Look for any columns containing 'close'
+        if len(self.close_indices) < len(instruments):
+            close_columns = [i for i, name in enumerate(feature_names) if 'close' in name.lower()]
+            if close_columns:
+                # Assign remaining instruments to available close columns
+                remaining = [instr for instr in instruments if instr not in self.close_indices]
+                for i, instr in enumerate(remaining):
+                    self.close_indices[instr] = close_columns[i % len(close_columns)]
+        
+        # Method 3: If no 'close' found at all, assume last column for each instrument section
+        if len(self.close_indices) < len(instruments):
+            cols_per_instrument = len(feature_names) // len(instruments)
+            for i, instr in enumerate(instruments):
+                if instr not in self.close_indices:
+                    # Assuming the last column in each instrument's features is the close price
+                    self.close_indices[instr] = (i * cols_per_instrument) + (cols_per_instrument - 1)
+        
+        print(f"Found close indices: {self.close_indices}")
+            
         self.initial_balance = initial_balance
         self.leverage = leverage
         self.spread = spread_pips
@@ -56,10 +89,27 @@ class ForexEnv(gym.Env):
                               )
 
     def step(self, action):
-        """Take a step in the environment based on the given action."""
-        assert self.action_space.contains(action), "Invalid action"
+        # Ensure action is a numpy array and clip to valid range [0, 2]
+        if isinstance(action, (np.ndarray, list)):
+            action = np.array(action, dtype=np.int32)
+        elif isinstance(action, dict) and "actions" in action:
+            action = np.array(action["actions"], dtype=np.int32)
+        elif np.isscalar(action):
+            action = np.array([int(action)], dtype=np.int32)
+        else:
+            action = np.zeros(self.n_instruments, dtype=np.int32)
+        
+        # Clip actions to valid range [0, 2]
+        action = np.clip(action, 0, 2)
+
+        # Calculate the previous total before taking actions
         previous_total_value = self.total_value
+
+        # Get current prices for each instrument
         current_prices = [self.data_array[self.current_step, self.close_indices[instr]] for instr in self.instruments]
+
+        # Verify the action is valid
+        assert self.action_space.contains(action), f"Invalid action: {action}"
 
         # Update unrealized P/L for open positions
         for i in range(self.n_instruments):
@@ -138,6 +188,31 @@ class ForexEnv(gym.Env):
     def seed(self, seed=None):
         self.np_random, seed = seeding.np_random(seed)
         return [seed]
+    
+def env_creator(env_config):
+    """Create a properly initialized ForexEnv with all required parameters."""
+    # Make sure all required parameters are present
+    required_params = ["instruments", "data_array", "feature_names"]
+    for param in required_params:
+        if param not in env_config:
+            raise ValueError(f"Missing required parameter: {param}")
+    
+    # Print debug info before creating environment
+    print(f"Creating environment with: instruments={env_config['instruments']}, "
+        f"data shape={env_config['data_array'].shape}, "
+        f"features={len(env_config['feature_names'])}")
+    
+    # Create the environment with all parameters
+    return ForexEnv(
+        instruments=env_config["instruments"],
+        data_array=env_config["data_array"],
+        feature_names=env_config["feature_names"],
+        initial_balance=env_config.get("initial_balance", 1000),
+        leverage=env_config.get("leverage", 10),
+        spread_pips=env_config.get("spread_pips", 0.0001),
+        max_steps=env_config.get("max_steps", 50000),
+        render_frequency=env_config.get("render_frequency", 1000)
+    )
 
-# Register the environment
-register(id='forex-v0', entry_point='forex_env:ForexEnv')
+# Register with the new creator function
+register_env("forex-v0", env_creator)

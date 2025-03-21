@@ -44,10 +44,20 @@ def train_model(config):
     """Train the PPO model for multi-instrument Forex trading."""
     try:
         logger.info(f"Training started - CUDA: {torch.cuda.is_available()}")
-        
+
+        # Create a clean environment config with only the parameters for ForexEnv
+        env_config = {
+            "instruments": INSTRUMENTS,
+            "data_array": ENV_BASE_CONFIG["data_array"],
+            "feature_names": ENV_BASE_CONFIG["feature_names"],
+            "initial_balance": ENV_BASE_CONFIG["initial_balance"],
+            "leverage": ENV_BASE_CONFIG["leverage"],
+            "spread_pips": ENV_BASE_CONFIG["spread_pips"],
+            "render_frequency": ENV_BASE_CONFIG["render_frequency"]
+        }
         # Configure PPO for multi-instrument setup
         algo_config = PPOConfig()
-        algo_config.environment(env="forex-v0", env_config=ENV_BASE_CONFIG)
+        algo_config.environment(env="forex-v0", env_config=env_config)
         algo_config.framework("torch")
         
         # Resource allocation
@@ -62,7 +72,14 @@ def train_model(config):
             train_batch_size=config["train_batch_size"],
             lr=config["lr"],
             gamma=config["gamma"],
-            model=config["model"]
+            model={
+                "custom_model": None,
+                "use_lstm": config["model_use_lstm"],
+                "lstm_cell_size": config["model"]["lstm_cell_size"],
+                "fcnet_hiddens": config["model"]["fcnet_hiddens"],
+                "fcnet_activation": config["model"]["fcnet_activation"],
+                "vf_share_layers": True
+            }
         )
         
         algo_config.rollouts(
@@ -82,6 +99,11 @@ def train_model(config):
         for epoch in range(config["num_epochs"]):
             result = trainer.train()
             mean_reward = result.get("episode_reward_mean", -float('inf'))
+            logger.info(f"Epoch {epoch + 1}: Mean Reward = {mean_reward}")
+            # Add this to debug
+            sample_batch = trainer.workers.local_worker().sample()
+            actions = sample_batch["actions"]
+            logger.info(f"Sampled actions: {actions}")
             if not np.isfinite(mean_reward):
                 logger.warning(f"Non-finite reward: {mean_reward}")
                 mean_reward = -float('inf')
@@ -107,10 +129,21 @@ def train_model(config):
 def train_forex_model():
     """Execute the training pipeline with hyperparameter tuning and final training."""
     try:
+        # Create a clean environment config with only the parameters for ForexEnv
+        env_config = {
+            "instruments": INSTRUMENTS,
+            "data_array": ENV_BASE_CONFIG["data_array"],
+            "feature_names": ENV_BASE_CONFIG["feature_names"],
+            "initial_balance": ENV_BASE_CONFIG["initial_balance"],
+            "leverage": ENV_BASE_CONFIG["leverage"],
+            "spread_pips": ENV_BASE_CONFIG["spread_pips"],
+            "render_frequency": ENV_BASE_CONFIG["render_frequency"]
+        }
+
         # Base configuration for final training
         base_config = {
             "env": "forex-v0",
-            "env_config": ENV_BASE_CONFIG,
+            "env_config": env_config,
             "num_epochs": TUNING_SETTING["tune_epochs"],
             "model_use_lstm": True,
             "num_rollout_workers": NUM_ROLLOUT_WORKERS
@@ -125,7 +158,7 @@ def train_forex_model():
                 "custom_model": None,
                 "use_lstm": True,
                 "lstm_cell_size": tune.choice([128, 256]),
-                "fcnet_hiddens": tune.choice([[128, 128], [256, 256]]),
+                "fcnet_hiddens": tune.choice([(128, 128), (256, 256)]),
                 "fcnet_activation": tune.choice(["relu", "tanh"])
             }
         }
@@ -177,7 +210,7 @@ def train_forex_model():
 
         # Save the final model
         final_config = PPOConfig()
-        final_config.environment(env="forex-v0", env_config=ENV_BASE_CONFIG)
+        final_config.environment(env="forex-v0", env_config=env_config)
         final_config.framework("torch")
         final_config.resources(
             num_gpus=1 if torch.cuda.is_available() else 0,
@@ -207,7 +240,7 @@ def train_forex_model():
 if __name__ == "__main__":
     try:        # Initialize Ray and fetch data for training
         from data_handler import DataHandler  
-        data_handler = DataHandler(api_key=data_handler.api_key, account=data_handler.account)
+        data_handler = DataHandler()
         data_array, feature_names = data_handler.get_data(
             instruments=INSTRUMENTS,
             start_date=ENV_BASE_CONFIG["start_date"],
@@ -217,6 +250,8 @@ if __name__ == "__main__":
         )
         ENV_BASE_CONFIG["data_array"] = data_array
         ENV_BASE_CONFIG["feature_names"] = feature_names
+        print(f"Feature names: {feature_names}")
+        print(f"Data array shape: {data_array.shape}")
 
         ray.init(
             num_cpus=4,

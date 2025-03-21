@@ -160,9 +160,12 @@ class DataHandler:
 
         # Add date column for merging correlations
         df_main['date'] = df_main.index.date
-
+        
+        # Create date column in correlations dataframe
+        df_correlations['date'] = df_correlations.index.date
+        
         # Merge daily correlations into main data
-        df_main = df_main.merge(df_correlations, left_on='date', right_index=True, how='left')
+        df_main = df_main.merge(df_correlations, on='date', how='left')
 
         # Drop date column and remove rows with NaN values
         df_main = df_main.drop(columns=['date']).dropna()
