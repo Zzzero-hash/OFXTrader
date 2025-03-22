@@ -64,7 +64,7 @@ def train_model(config):
         # Resource allocation
         algo_config.resources(
             num_gpus=1 if torch.cuda.is_available() else 0,  
-            num_cpus_per_worker=1,
+            num_cpus_per_worker=0,
             num_gpus_per_worker=0 
         )
         
@@ -111,10 +111,10 @@ def train_model(config):
                 best_mean_reward = mean_reward
             
             # Just report metrics every iteration without checkpoints
-            session.report(mean_reward=mean_reward)
+            session.report({"mean_reward": mean_reward})
         
         # Final report with final mean reward
-        session.report(mean_reward=best_mean_reward)
+        session.report({"mean_reward": best_mean_reward})
         
         trainer.stop()  # Clean up resources
 
